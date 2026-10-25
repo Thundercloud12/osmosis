@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+dist/
+.vite/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# Local tooling and credentials
+.agents/
+.aws/
+.codex/
