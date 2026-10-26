@@ -508,7 +508,12 @@ export class ArenaRoom extends Room {
     for (const player of this.players.values()) {
       if (!player.linkedPlayerId) continue;
       const linked = this.findById(player.linkedPlayerId);
-      if (!linked || player.id > linked.id || player.status !== "ACTIVE" || linked.status !== "ACTIVE" || !this.withinLinkRange(player, linked)) this.breakLink(player);
+      if (!linked) {
+        this.breakLink(player);
+        continue;
+      }
+      if (player.id > linked.id) continue;
+      if (player.status !== "ACTIVE" || linked.status !== "ACTIVE" || !this.withinLinkRange(player, linked)) this.breakLink(player);
     }
   }
 
