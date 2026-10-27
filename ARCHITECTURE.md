@@ -9,11 +9,11 @@
 | Concern | Decision |
 |---|---|
 | Client shell | React + TypeScript + Vite |
-| Game rendering | Phaser 3 (2D top-down; Arcade Physics for local prototype and visual collisions) |
+| Game rendering | Phaser 3 for 2D rendering; shared pure movement/collision rules for local prediction and server authority |
 | Styling | Tailwind CSS for menus and HUD; DOM overlay above canvas |
 | Multiplayer | Node.js + TypeScript + Colyseus room; WebSocket state/events |
-| Source of truth | Colyseus server owns simulation, positions, collisions, LOS, score, clock, link state and results |
-| Voice | LiveKit client SDK/WebRTC, separate audio room per team; tokens minted **server-side** |
+| Source of truth | Colyseus server owns simulation, positions, collisions, LOS, score, clock, link state, pole ownership, elimination and results |
+| Voice | LiveKit client SDK/WebRTC, private audio room per team plus one optional Global room per match round; channel tokens minted **server-side** |
 | Persistence | None for v1; matches/rooms in memory; ephemeral signed reconnect tokens |
 | Hosting | One Node.js game server + static web app; optional separately hosted/self-hosted LiveKit |
 | Workspace | pnpm monorepo with shared TypeScript domain/contracts |
@@ -45,8 +45,8 @@ flowchart LR
   end
   CLIENT <-->|WSS inputs / filtered state| ROOM
   UI -->|HTTPS room API / voice token request| TOKEN
-  RTC <-->|WebRTC audio| LK[LiveKit service]
-  TOKEN -->|signed per-team grants| LK
+  RTC <-->|WebRTC Team + optional Global audio| LK[LiveKit service]
+  TOKEN -->|signed per-channel grants| LK
 ```
 
 ## 3. Repo boundaries
@@ -84,12 +84,31 @@ osmosis/
 
 **Dependency rule:** `web` and `server` may import `shared`; `shared` imports neither. Phaser code never runs on the game server. Shared geometry is pure data and deterministic TypeScript math, not Phaser physics objects.
 
+### Required separation of concerns
+
+The current `ArenaRoom.ts` and `ArenaScene.ts` combine too many responsibilities. Refactor incrementally into the following boundaries within the existing applications; no new services or technologies are required.
+
+| Boundary | Responsibility |
+|---|---|
+| Server room adapter | Colyseus connections, message routing, scheduling and sending results; delegates domain decisions |
+| Server match model and orchestrator | Owns canonical match state and explicitly orders simulation systems; supplies time and configuration |
+| Server gameplay systems | Separate movement, contact/battle settlement, links, pickups, raids, poles/elimination and recovery; each changes only its documented state fields |
+| Server lobby/session services | Allocation, readiness, phases, reconnect and role assignment |
+| Server snapshot projection | Recipient-specific visibility, score/status privacy and spectator views; gameplay systems never construct transport payloads |
+| Shared pure rules | Movement/collision step, settlement, configuration and validated contracts; no browser, Phaser, Colyseus or network dependencies |
+| Client network simulation | Input history, acknowledgments, prediction/reconciliation and remote snapshot buffers |
+| Client scene composition | Creates and connects controllers/renderers, schedules updates and disposes resources |
+| Client presentation modules | Map, characters, pickups, fog, links, camera, feedback and spectator controls; consume explicit view data |
+| React HUD | Displays authorized snapshots and issues intents; never resolves gameplay outcomes |
+
+Use explicit typed inputs/results and injected clocks where time matters. Avoid modules that merely call back into a giant room/scene or share unrestricted mutable state. Preserve behavior during extraction, then change rules in separate reviewable steps. Keep one authoritative state owner and a documented tick order. Add focused regression coverage for extracted behavior and room-level integration coverage for the complete sequence.
+
 ## 4. Authoritative simulation
 
-- Fixed simulation step target **20 ticks/sec** (50ms); client renders at display refresh rate and interpolates remote avatars.
+- Fixed simulation step target **20 ticks/sec** (50ms); the client predicts local movement at 20Hz and interpolates remote avatars between snapshots.
 - Clients send **intent** (`move` input direction, `interact`, `linkStart`, `linkStop`, `ping`), never coordinates as facts, scores or collision outcomes.
 - Server computes speed-limited movement and canonical map collisions, then determines LOS, interactions and scoring.
-- Client may predict **its own** movement and reconcile to server snapshots; remote players interpolate. No client-side optimistic score changes.
+- Client may predict **its own** movement and reconcile to server snapshots; remote players interpolate. No client-side optimistic score changes. Movement polish must preserve authoritative server movement and shared collision geometry.
 - Process input sequence numbers/timestamps to reject stale or repeated commands; rate-limit inputs and HTTP endpoints.
 - Use server monotonic elapsed time for 900s match; expose timestamp/deadline to clients; server decides on exact timeout.
 - The match is authoritative **even if a client opens devtools or tampers with Phaser**.
@@ -100,17 +119,22 @@ osmosis/
 
 | Field | Authorized audience |
 |---|---|
-| Own points, status, position | Self |
+| Own points, status, position and movement-freeze timer | Self |
 | Team roster and teammate positions/status | Same team |
 | Teammate points | Same team (team strategy) |
 | Enemy avatar position, name | Only while inside server-computed field-of-view and unoccluded |
-| Enemy exact points | Never during match |
+| Enemy exact points and aggregate team score | Never in PLAYING snapshots; both team totals and every player's final balance are allowed in RESULTS payloads |
+| Enemy temporary INACTIVE status/timer or movement-freeze timer | Never; keep the enemy avatar's ordinary spotted presentation |
+| Permanent elimination | Eliminated player receives spectator state with zero points; a spotted opponent may see the permanent elimination, never its live numeric balance |
 | Map obstacle geometry, visible pickups | Static public map; item visibility under local fog |
-| Team score | Both teams (aggregate only) |
+| Own aggregate team score | Same team only |
 | Team voice authorization | Member of matching team only |
-| End-of-match full breakdown | All players after result phase |
+| Global voice authorization | Connected member of the same match and round; Global audio is never routed through either private Team room |
+| End-of-match score breakdown | All players receive both final team totals and every player's final balance, only after phase becomes RESULTS |
 
 **Fog/security distinction:** A dark overlay alone is only visual; visibility **must also filter network data**. Team locations can appear on own minimap; enemy minimap is limited to currently spotted enemies (or omit enemy markers in v1).
+
+**Score/status privacy:** Construct score and player-status fields per recipient on the server. Hiding a scoreboard value in React or masking an enemy sprite is insufficient if the value or `INACTIVE` state remains in the payload. Spectators inherit a living teammate's visibility scope; they do not receive a room-wide observer feed.
 
 ## 5. Match lifecycle / state machine
 
@@ -119,12 +143,14 @@ CREATED -> LOBBY -> ALLOCATION -> COUNTDOWN -> PLAYING -> RESULTS -> LOBBY (rema
                               \-> LOBBY (cancellation)
 ```
 
-Only server performs transitions. Lobby requires 5 players/team; allocation must sum to 10,000/team and be locked; countdown requires all connected players ready; start initializes spawns, items, timestamp and active status atomically. `RESULTS` is terminal for the round; rematch creates fresh round state without leaking prior scores.
+Only server performs transitions. Lobby requires the configured room size/team; allocation must sum to 10,000/team, assign at least 500 to each player, and be locked; countdown requires all connected players ready; start initializes spawns, items, timestamp and active status atomically. `RESULTS` is terminal for the round; rematch creates fresh round state without leaking prior scores.
+
+Player status is independent of match phase: `ACTIVE`, temporary `INACTIVE`, `ELIMINATED`, or `DISCONNECTED`. INACTIVE players may move but cannot collect pickups, link, raid or win an ordinary battle until their timer expires or they enter their own base. Contact between ACTIVE and INACTIVE opponents freezes only the ACTIVE player's movement for three server seconds; it changes neither player's status or score. The active freeze deadline is private to its player. Pole-holder contact takes precedence and permanently eliminates the touching opponent, clears their remaining points without transferring them, and emits a contact-scoped visual event. Battle settlement that reduces any player's individual balance to zero also permanently eliminates that player. `ELIMINATED` is permanent for the current round and retains its room membership with a zero balance; the client switches to spectator mode and remains in team voice. A spectator automatically follows a living teammate in deterministic roster order and receives only that teammate's filtered view. If every rostered player on a team is `ELIMINATED`, the other team wins immediately.
 
 ### Roles
 - **Host:** can start/cancel countdown and rematch; not automatically a team captain.
 - **Captain:** can submit/lock allocation for own team.
-- **Player:** nickname, ready, move, battle, link, raid, voice, ping.
+- **Player:** nickname, ready, move, battle, link, raid, voice, ping; an eliminated player may spectate but cannot submit gameplay actions.
 - Role assignment and transfer are server-validated. Never trust a client-provided `isHost` or `isCaptain` flag.
 
 ## 6. Contracts (conceptual, version and validate actual payloads)
@@ -141,46 +167,66 @@ type ClientCommand =
   | { type: 'lockAllocation' };
 
 type MatchPhase = 'LOBBY' | 'ALLOCATION' | 'COUNTDOWN' | 'PLAYING' | 'RESULTS';
+type PlayerStatus = 'ACTIVE' | 'INACTIVE' | 'ELIMINATED' | 'DISCONNECTED';
 ```
 
-Use an explicit schema validator (e.g. Zod) at the network boundary. Send server events for `battleResolved`, `pointsChanged`, `itemCollected`, `raidStarted/Interrupted/Completed`, `playerInactive/Rearmed`, `matchEnded`, `error`. Event recipient and secrecy are explicit; never emit points-change payloads revealing opponent balance.
+Use an explicit schema validator (Zod) at the network boundary. Send typed server events for `battleResolved`, `pointsChanged`, `itemCollected`, `raidStarted/Interrupted/Completed`, `playerInactive/Rearmed`, `playerEliminated`, `matchEnded`, and `error`. Battle feedback is sent only to the participants and contains their event-time positions/outcomes, not point balances. Pole-elimination feedback is sent only to the touching attacker and holder. Raid progress feedback is private to the raider. Never emit a points-change payload revealing opponent balance or temporary enemy inactivity. Event IDs are unique per round and clients deduplicate them.
+
+### Client feedback rendering
+
+- Keep feedback in the Phaser presentation layer. A typed, recipient-filtered game event confirms the outcome; the renderer may animate it but never changes score, status, movement or collision.
+- Use Phaser 3.90 tweens and bounded particle bursts for tag impact/recoil, pole elimination, and raid start/completion/interruption. Keep effects short, clean them up, and render them below the fog layer so an event cannot reveal an unseen area.
+- Use only a small set of local 2D VFX textures from Kenney Particle Pack (CC0); use simple Phaser shapes for broad area indicators so they remain legible without obscuring the playfield. Keep the license beside the assets and provenance in `assets/third-party/README.md`. Do not add an animation framework.
+- Raid stage feedback goes only to its raider. Do not include point amounts in battle events or any hidden opponent data. The existing snapshot remains the source for authorized live score changes.
 
 ## 7. Gameplay systems and invariants
 
 | System | Server invariant |
 |---|---|
-| Team allocation | Exactly 10,000 per team; 100-point increments, each >=0; locked before start |
-| Movement | Never crosses blocked tile or bounds; collision math deterministic |
+| Team allocation | Exactly 10,000 per team; 100-point increments; each player starts at >=500; locked before start |
+| Movement | Never crosses blocked tile or bounds; collision math deterministic. ACTIVE and INACTIVE may move unless the server freeze deadline is in the future |
 | LOS | Occlusion computed from map wall segments; no unseen enemy position serialized |
-| Battles | Only ACTIVE opponents in contact; compare points/linked team; each contact resolves once |
-| Score transfer | Winner gain equals loser debit, max 500; no negative scores; simultaneous input ordering deterministic |
-| Inactivity | Participating battlers marked INACTIVE; only own base restores ACTIVE |
+| Battles | Ordinary contact between ACTIVE opponents resolves once. HQ location alone gives no immunity; a pole-holder contact is evaluated first |
+| Score transfer | Winner gain equals loser debit, max 500; no negative scores; any participant whose balance becomes zero is eliminated in the same simulation step; simultaneous input ordering deterministic |
+| Inactivity | Ordinary battle participants become INACTIVE for 15 server-measured seconds and retain movement; own base restores ACTIVE immediately, otherwise the timer does. They cannot collect pickups, link, raid or win a battle. Opponents never receive this temporary status or timer |
+| Inactive contact | ACTIVE touching INACTIVE freezes only the ACTIVE player's movement for three server-measured seconds. No battle, point transfer or status change. The freeze is applied once per contact edge and never extends while the same contact persists. INACTIVE-INACTIVE contact has no effect |
+| Elimination | Pole contact permanently marks the touching opponent ELIMINATED for the round, including an INACTIVE toucher; no timer/base/reconnect re-arm, no point transfer to the holder, and the eliminated player's balance is set to zero. Battle depletion to zero also eliminates. Pole resolution precedes battle and freeze rules. The room slot remains and the eliminated client becomes a filtered spectator |
+| HQ pole | Replaces the earlier five-second combat boost. One active holder per team's pole. A teammate cannot enter an occupied pole zone; first eligible entrant owns it until leaving or becoming unavailable. Any non-eliminated enemy touching that holder, including an INACTIVE enemy, is immediately ELIMINATED; holder remains ACTIVE |
+| HQ battles | If no pole-holder special case applies, contact inside a base resolves as an ordinary battle and transfers points under the normal rules |
 | Links | Max two ACTIVE allies within range + LOS; terminate on distance, disconnect or inactivity |
 | Pickups | Each pickup awarded once; award 200 to collector |
 | Raids | 3s uninterrupted base interaction, 2,000 reward, 90s per-team raid cooldown; defenders interrupt |
-| Finish | Exactly one server result after 900s; total comparison; tie = draw |
+| Finish | Exactly one server result; a fully ELIMINATED team loses immediately. Otherwise, at 900s compare totals and draw on a tie |
 
-**Collision resolution:** Phaser Arcade Physics handles rapid local prototyping and visuals. Server uses matching pure AABB/circle geometry from `shared/map` (not Phaser on the server). Test boundary and high-latency cases. Prefer collision shapes aligned with rendered container footprints.
+**Collision resolution:** The shared pure movement step and AABB/circle geometry drive both server movement and local prediction. Phaser renders those positions; Phaser physics does not own gameplay collision. Resolve pole-holder contact before ordinary battle logic; do not treat the whole HQ zone as protection. Test boundaries and high-latency cases. Prefer collision shapes aligned with rendered container footprints.
 
-**Combat trigger:** Start a battle on the first valid opposing-player contact edge, not every frame while two sprites overlap. A short contact lock suppresses duplicate events; inactive characters cannot trigger it.
+**Combat trigger:** Resolve pole-holder contact first. Otherwise, ACTIVE-ACTIVE contact starts a battle on the first contact edge, not every frame while two sprites overlap. ACTIVE-INACTIVE contact freezes the ACTIVE player without scoring; INACTIVE-INACTIVE contact is ignored. A short contact lock prevents repeated freezes until the players separate.
+
+**Movement quality follow-up:** The current 20Hz authoritative simulation and snapshots remain the baseline until measured. Capture input sequence, server tick/snapshot timing, displayed position, authoritative position, and correction size under local and tunneled connections before tuning. Prefer timestamped remote snapshot interpolation and bounded local reconciliation; keep server movement and canonical collision geometry authoritative. Do not raise simulation frequency solely to mask visual jitter.
+
+**Movement implementation plan:** Share deterministic movement/collision stepping between server simulation and local prediction. Record numbered input steps with explicit simulation timing; the server acknowledges inputs actually simulated, not merely received. The client restores the acknowledged authoritative state, discards acknowledged history and replays pending input steps. Bound input history and validate timing so replay cannot grant extra movement. Correct simulation state immediately while smoothing a separate render offset for small errors; reserve hard resets for discontinuities or unrecoverable errors. Interpolate remote players through a timestamped snapshot buffer and clear stale history on visibility loss, reconnect or respawn. Never replay pickup rewards or battle outcomes as part of movement prediction.
+
+The previous 96-unit hard-correction threshold was too large relative to the 38-unit pickup radius. Reconciliation now smooths render-only corrections up to 40 units and snaps larger errors. A movement trace can correlate apparent misses or jumps with acknowledged input and authoritative distance; the trace does not prove a runtime symptom until captured. Reference approaches: [prediction and reconciliation](https://www.gabrielgambetta.com/client-side-prediction-server-reconciliation.html), [remote interpolation](https://gabrielgambetta.com/entity-interpolation.html), and [Colyseus prediction](https://docs.colyseus.io/netcode/client-prediction).
 
 ## 8. Voice architecture
 
-- On entering match/lobby, client explicitly requests microphone permission before publishing audio.
-- Client calls game server's authenticated `/voice/token` endpoint with its reconnect/session credential.
-- Server verifies live membership and assigned team, then signs a **scoped, short-lived LiveKit token** permitting entry to `room-code:round-id:team-id`. Never trust `teamId` supplied by client; derive from room state.
-- Each team joins **a different LiveKit room**, preventing cross-team audio.
-- Mute and deafen are local controls; voice disconnect or denial must not block game join.
-- Never ship LiveKit API secret to browser; do not record voice; expire voice privileges on team change or departure.
-- Start with push-to-talk via `V`, manual mute/deafen, speaking indicator; handle no-audio-device and browser autoplay policies gracefully.
+- Client joins its private Team LiveKit room after explicit opt-in; Blue and Red use separate rooms named `room-code:round-id:team-id`.
+- One additional match-wide room, `room-code:round-id:GLOBAL`, carries only audio intentionally sent to Global. Global receive is independently opt-in and does not require leaving Team voice.
+- Client requests a server token for a channel using its signed player credential. The server derives team membership, round and room name from authoritative room state. A requested `TEAM` token permits only the player's assigned Team room; a `GLOBAL` token permits only that match's Global room. Never trust a client-supplied team, room name or round.
+- Use separate LiveKit client sessions for Team and Global so subscriptions can be controlled independently. Global opt-out unsubscribes Global audio tracks while preserving Team audio. Global sessions connect only when the player listens or selects Global transmission.
+- The outgoing microphone target is exactly one channel at a time. Switching target mutes the old channel before the new one can publish; selecting a target never unmutes automatically. One local DEAFEN control silences incoming audio from both sessions; Global mute affects Global reception only.
+- Voice disconnect or denial must not block game join. Game reconnect, rematch, explicit voice leave and unmount clean up both LiveKit sessions; opted-in sessions may rejoin muted after game reconnect/rematch.
+- Never ship LiveKit API secret to browser; do not record voice; issue short-lived, channel-scoped tokens only for connected room members.
+- Use `V` as a microphone toggle for the selected transmit target with displayed state matching LiveKit's actual microphone state; begin muted, retain speaking indicators, and handle no-audio-device and browser autoplay policies gracefully.
 
 ## 9. Room identity, reconnection and failures
 
 - Assign stable `playerId` independent from Colyseus transport `sessionId`.
-- Issue an unpredictable signed reconnect credential, stored only as needed in browser session storage (not URL); never use a nickname alone for authentication.
-- Reserve disconnected player slot for **60s**. On disconnect, player becomes non-interactable and motion freezes; team points persist. Rejoin restores same identity/state and voice authorization.
-- After grace period, retain frozen player state/points until match end so score totals remain deterministic; no new participant fills slots mid-match. In lobby, remove empty slot and invalidate readiness.
-- Transfer host or captain role using a deterministic eligible-player rule; reconnect does not automatically reclaim reassigned privileges.
+- Use the Colyseus-issued unpredictable reconnection token, stored by room code in browser `localStorage` (never in the URL). Persistent storage is required because the supported recovery case includes closing and reopening the browser; `sessionStorage` may disappear with the tab. Migrate any legacy session token once. Never use a nickname alone for authentication. Clear the token on an explicit leave or when the matchmaker rejects it.
+- Reserve a disconnected player slot for **120 seconds**, measured by the server. On disconnect, mark the player non-interactable and freeze movement; preserve team points and the prior gameplay status. Reconnect with the token restores the same player and voice authorization. If the player was already ELIMINATED, reconnect restores spectator mode and never reactivates them.
+- After the grace period, retain the frozen player record and points until match end so team totals remain deterministic; no new participant fills a slot mid-match. In the lobby, remove the expired player and invalidate readiness. A failed token reconnect must not silently fall back to a new seat; show an explanation and let the user explicitly join again if the room permits it.
+- An intentional Leave Room action clears the saved token. While connected, it leaves without a reconnection reservation; during a match the disconnected record and points remain until results, while a lobby slot is freed immediately. If the client is already offline, it cannot signal that intent to the server, so its reserved seat expires within the 120-second grace period.
+- Transfer host or captain role using the deterministic eligible-player rule when a player disconnects or explicitly leaves. A connected eliminated host remains host while spectating; a returning player does not automatically reclaim reassigned privileges.
 - Network errors show reconnect UI; simulation continues on server. Empty room disposal is delayed through reconnect window.
 
 ## 10. Security and privacy constraints
@@ -190,8 +236,10 @@ Use an explicit schema validator (e.g. Zod) at the network boundary. Send server
 3. No private enemy data in snapshots, event logs returned to clients, minimap caches or React state.
 4. Reconnect/session tokens and voice credentials are signed, scoped, short-lived; use HTTPS/WSS in deployment.
 5. Rate-limit creates, joins, movement and token issuance; sanitize nicknames; cap request lengths.
-6. Team voice is opt-in with clear mute/deafen; no voice recording and no unnecessary personal data collection.
+6. Team and Global voice are opt-in with clear channel-specific mute and full deafen controls; no voice recording and no unnecessary personal data collection.
 7. At launch keep rooms invite-only; add reporting/abuse controls before considering public discovery.
+
+The 1v1 and 2v2 room modes are temporary test-only options. The client exposes them in development builds; the server rejects them when `NODE_ENV=production` unless `ENABLE_TEST_ROOM_MODES=true` is explicitly set for a controlled test deployment.
 
 ## 11. Deployment and observability
 
@@ -214,11 +262,11 @@ Node.js/Colyseus app on small VPS (WSS + token HTTPS)
 
 ## 12. Testing strategy and definition of done
 
-**Unit (pure rules):** allocation totals, tie handling, capped transfers, linked settlement (including one player at zero), battle inactive logic, raid interruption, cooldowns, deterministic ordering, timer boundaries, occlusion segment tests.
+**Unit (pure rules):** allocation totals, tie handling, capped transfers, linked settlement (including one player at zero), pole-holder elimination precedence, exclusive pole ownership, permanent elimination, 15-second inactivity and re-arm, raid interruption, cooldowns, deterministic ordering, timer boundaries, occlusion segment tests.
 
-**Integration (server):** two Colyseus clients in a room; complete ten-player allocation/start; reject forged score; walls stop movement; hidden enemy omitted from client snapshot; team isolation; reconnect identity; rematch state reset; two-room isolation.
+**Integration (server):** two Colyseus clients in a room; complete ten-player allocation/start with >=500 per player; reject below-minimum allocations and forged score; walls stop movement; hidden enemy omitted from client snapshot; enemy inactivity and opposing score fields absent from every PLAYING payload; RESULTS includes both team totals and all player balances; zero-balance and pole eliminations clear points and preserve spectator behavior; only event participants receive tag feedback; Team/Global token scopes and private Team-room isolation; rematch state reset; two-room isolation.
 
-**E2E (browser):** create room -> join -> choose teams -> allocate -> start -> walk/tag/collect/raid -> results; mic denial fallback; browser refresh and rejoin. Use deterministic debug/accelerated clock only in test mode, not production gameplay.
+**E2E (browser):** create room -> join -> choose teams -> allocate -> start -> walk/tag/collect/raid -> pole elimination -> spectate -> results; verify HQ fights without a pole holder; verify score/status privacy; mic denial fallback; browser refresh and rejoin. Use deterministic debug/accelerated clock only in test mode, not production gameplay.
 
 **Performance baseline:** ten connected browser tabs per room, 20Hz server tick target, smooth client rendering on mainstream laptop, no excessive GC pauses. Measure before optimizing.
 
@@ -229,6 +277,7 @@ Node.js/Colyseus app on small VPS (WSS + token HTTPS)
 - **Do not** replace Phaser with canvas primitives, Pixi, Three.js, Unity or a homegrown engine unless explicitly approved.
 - **Do not** move authoritative scoring/collision/visibility into React/Phaser.
 - **Do not** broadcast all players and merely hide enemies with CSS/fog.
+- **Do not** send opposing numeric scores or temporary inactivity status and rely on the client to hide them.
 - **Do not** add PostgreSQL, Redis, Kafka, microservices, matchmaking or accounts for the v1 vertical slice.
 - **Do not** implement voice over the Colyseus gameplay WebSocket; use WebRTC/LiveKit.
 - **Do not** let visual prototype's client-only logic become production source of truth.

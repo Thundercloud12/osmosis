@@ -2,7 +2,7 @@ import { defineRoom, defineServer, matchMaker } from "colyseus";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { AccessToken } from "livekit-server-sdk";
 
-import { activeArenaRooms, ArenaRoom } from "./rooms/ArenaRoom";
+import { activeArenaRooms, ArenaRoom, type VoiceChannel } from "./rooms/ArenaRoom";
 
 const allowedOrigins = new Set(
   (process.env.CLIENT_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173")
@@ -50,13 +50,15 @@ export const server = defineServer({
       response.json({ status: "ok", voiceConfigured: Boolean(process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) });
     });
     app.post("/voice/token", async (request: Request, response: Response) => {
-      const body = request.body as { roomCode?: unknown; credential?: unknown } | undefined;
+      const body = request.body as { roomCode?: unknown; credential?: unknown; channel?: unknown } | undefined;
       const validBody = Boolean(body && typeof body.roomCode === "string" && /^[A-Z2-9]{6}$/i.test(body.roomCode)
-        && typeof body.credential === "string" && body.credential.length >= 20 && body.credential.length <= 2_048);
+        && typeof body.credential === "string" && body.credential.length >= 20 && body.credential.length <= 2_048
+        && (body.channel === undefined || body.channel === "TEAM" || body.channel === "GLOBAL"));
       if (!validBody) { response.status(400).json({ error: "Invalid voice request." }); return; }
       if (!body || typeof body.roomCode !== "string" || typeof body.credential !== "string") return;
+      const channel: VoiceChannel = body.channel === "GLOBAL" ? "GLOBAL" : "TEAM";
       const room = activeArenaRooms.get(body.roomCode.toUpperCase());
-      const identity = room?.authorizeVoiceCredential(body.credential);
+      const identity = room?.authorizeVoiceCredential(body.credential, channel);
       if (!room || !identity) { response.status(403).json({ error: "Voice access could not be authorized for this player." }); return; }
       const { LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET } = process.env;
       if (!LIVEKIT_URL || !LIVEKIT_API_KEY || !LIVEKIT_API_SECRET) {
@@ -69,9 +71,9 @@ export const server = defineServer({
           ttl: "10m",
         });
         token.addGrant({ roomJoin: true, room: identity.roomName, canPublish: true, canSubscribe: true, canPublishData: false });
-        response.json({ serverUrl: LIVEKIT_URL, token: await token.toJwt(), roomName: identity.roomName });
+        response.json({ serverUrl: LIVEKIT_URL, token: await token.toJwt(), roomName: identity.roomName, channel });
       } catch {
-        response.status(503).json({ error: "Team voice is temporarily unavailable." });
+        response.status(503).json({ error: "Voice is temporarily unavailable." });
       }
     });
   },

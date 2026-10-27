@@ -2,53 +2,36 @@ import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 
 import { Room, ServerError, matchMaker, type Client } from "colyseus";
 import {
-  ARENA_CONFIG,
-  ARENA_OBSTACLES,
   GAME_RULES,
   MOVEMENT_CONFIG,
   TEAM_BASES,
+  TEAM_SPAWNS,
+  TEAM_SPAWN_SPACING,
   clientCommandSchema,
   generatePickupLocations,
-  hasLineOfSight,
+  gameEventSchema,
   lobbySnapshotSchema,
   remainingSeconds,
   roomSnapshotSchema,
-  settleBattle,
+  roomModeSchema,
   type LobbyPlayer,
-  type PlayerSnapshot,
+  type PlayerStatus,
+  type GameEvent,
   type TeamId,
+  type RoomMode,
 } from "@osmosis/shared";
-
-type PlayerStatus = "ACTIVE" | "INACTIVE" | "DISCONNECTED";
-interface ServerPlayer {
-  id: string;
-  nickname: string;
-  teamId: TeamId;
-  x: number;
-  y: number;
-  dx: -1 | 0 | 1;
-  dy: -1 | 0 | 1;
-  lastSequence: number;
-  ready: boolean;
-  joinOrder: number;
-  startingPoints: number | undefined;
-  points: number;
-  status: PlayerStatus;
-  connected: boolean;
-  statusBeforeDisconnect: PlayerStatus | undefined;
-  linkedPlayerId: string | undefined;
-  voiceCredential: string | undefined;
-  voiceCredentialExpiresAt: number;
-  voiceCredentialRoomName: string | undefined;
-  pickupsCollected: number;
-  battlesWon: number;
-  raidsCompleted: number;
-}
-interface Pickup { id: string; x: number; y: number }
-interface ActiveRaid { playerId: string; startedAt: number }
+import { movePlayer, releasePole, touchesHomePole, type PoleHolders } from "../systems/MovementSystem";
+import { collectPickups } from "../systems/PickupSystem";
+import { opponentTeam, resolveContact, settleGroups } from "../systems/BattleSystem";
+import { breakLink as breakLinkSystem, startLink as startLinkSystem, validateLinks, withinLinkRange } from "../systems/LinkSystem";
+import { advanceRaids as advanceRaidsSystem, cancelRaid, setRaid, type ActiveRaid } from "../systems/RaidSystem";
+import { eliminatePlayer as eliminatePlayerSystem, eliminatedTeamWinner, freezeMovement as freezeMovementSystem, makeInactive as makeInactiveSystem, rearmPlayers as rearmPlayersSystem, reconcilePoleHolders as reconcilePoleHoldersSystem } from "../systems/PlayerStatusSystem";
+import { projectSnapshot } from "../security/SnapshotProjector";
+import { connectedPlayerCount as countConnectedPlayers, disconnectPlayer, oldestConnectedPlayerId, purgeDisconnectedPlayersForRematch, reconnectPlayer } from "../systems/PresenceSystem";
+import { roomModeAllowed } from "./RoomModePolicy";
+import type { Pickup, ServerPlayer } from "./Player";
 
 const PLAYER_RADIUS = MOVEMENT_CONFIG.playerRadius;
-const PICKUP_RADIUS = 16;
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 type RoomPhase = "LOBBY" | "ALLOCATION" | "COUNTDOWN" | "PLAYING" | "RESULTS";
 const VOICE_CREDENTIAL_SECRET = process.env.RECONNECT_SECRET ?? randomBytes(32).toString("base64url");
@@ -61,9 +44,13 @@ export interface VoiceIdentity {
   roomName: string;
 }
 
+export type VoiceChannel = "TEAM" | "GLOBAL";
+
 export const activeArenaRooms = new Map<string, ArenaRoom>();
 
 export class ArenaRoom extends Room {
+  private roomMode: RoomMode = "STANDARD";
+  private playersPerTeam: number = GAME_RULES.teamSize;
   private readonly players = new Map<string, ServerPlayer>();
   private phase: RoomPhase = "LOBBY";
   private hostPlayerId: string | undefined;
@@ -74,16 +61,28 @@ export class ArenaRoom extends Room {
   private countdownDeadline: number | undefined;
   private matchDeadline: number | undefined;
   private readonly activeContactPairs = new Set<string>();
+  private readonly poleHolders: PoleHolders = { BLUE: undefined, RED: undefined };
   private readonly activeRaids: Record<TeamId, ActiveRaid | undefined> = { BLUE: undefined, RED: undefined };
   private readonly raidCooldownUntil: Record<TeamId, number> = { BLUE: 0, RED: 0 };
   private pickups: Pickup[] = [];
   private roundNumber = 0;
+  private gameEventSequence = 0;
+  private resultWinnerOverride: TeamId | null = null;
   private readonly captainReassignTimers: Record<TeamId, ReturnType<typeof setTimeout> | undefined> = { BLUE: undefined, RED: undefined };
 
-  override async onCreate(): Promise<void> {
+  override async onCreate(options: unknown): Promise<void> {
+    const requestedMode = typeof options === "object" && options !== null && "roomMode" in options
+      ? options.roomMode
+      : undefined;
+    const parsedRoomMode = roomModeSchema.safeParse(requestedMode);
+    this.roomMode = parsedRoomMode.success ? parsedRoomMode.data : "STANDARD";
+    if (!roomModeAllowed(this.roomMode)) throw new ServerError(400, "Test room modes are disabled on this server.");
+    this.playersPerTeam = this.roomMode === "TEST_1V1" ? 1
+      : this.roomMode === "TEST_2V2" ? 2
+        : GAME_RULES.teamSize;
     this.roomId = await this.generateRoomCode();
     activeArenaRooms.set(this.roomId, this);
-    this.maxClients = 10;
+    this.maxClients = this.playersPerTeam * 2;
     this.maxMessagesPerSecond = 30;
     await this.setPrivate();
     this.setFixedTimestep((context) => this.step(context.dt), GAME_RULES.simulationHz);
@@ -93,49 +92,39 @@ export class ArenaRoom extends Room {
 
   override onAuth(_client: Client, _options: unknown): boolean {
     if (this.phase !== "LOBBY") throw new ServerError(400, "This room is no longer accepting players.");
+    if (this.players.size >= this.maxClients) throw new ServerError(400, "This room is full.");
     return true;
   }
 
   override async onDrop(client: Client): Promise<void> {
     const player = this.players.get(client.sessionId);
     if (!player) return;
-    player.connected = false;
-    player.statusBeforeDisconnect = player.status;
-    player.status = "DISCONNECTED";
-    player.dx = 0;
-    player.dy = 0;
-    player.ready = false;
+    disconnectPlayer(player, performance.now() + GAME_RULES.reconnectGraceSeconds * 1_000);
     this.breakLink(player);
     this.cancelRaidFor(player.id);
+    releasePole(player, this.poleHolders);
     if (this.phase === "COUNTDOWN") {
       this.phase = "LOBBY";
       this.countdownDeadline = undefined;
       this.resetReadyState();
       this.unlock();
     }
-    if (this.hostPlayerId === player.id) {
-      this.hostPlayerId = [...this.players.values()]
-        .filter((candidate) => candidate.connected && candidate.id !== player.id)
-        .sort((left, right) => left.joinOrder - right.joinOrder)[0]?.id;
-    }
-    if (this.captainIds[player.teamId] === player.id && this.phase !== "PLAYING" && this.phase !== "RESULTS") {
-      this.scheduleCaptainReassignment(player);
-    }
+    if (this.hostPlayerId === player.id) this.hostPlayerId = oldestConnectedPlayerId(this.players.values());
+    if (this.captainIds[player.teamId] === player.id) this.scheduleCaptainReassignment(player);
     if (this.phase === "PLAYING" || this.phase === "RESULTS") this.sendSnapshots();
     else this.sendLobbySnapshots();
     try {
       await this.allowReconnection(client, GAME_RULES.reconnectGraceSeconds);
     } catch {
-      if (this.players.has(client.sessionId)) this.onLeave(client);
+      // Colyseus calls onLeave after a dropped client's reconnection window expires.
     }
   }
 
   override onReconnect(client: Client): void {
     const player = this.players.get(client.sessionId);
     if (!player) return;
-    player.connected = true;
-    player.status = player.statusBeforeDisconnect ?? "ACTIVE";
-    player.statusBeforeDisconnect = undefined;
+    reconnectPlayer(player, performance.now(), (candidate) => this.isInsideBase(candidate, TEAM_BASES[candidate.teamId]));
+    if (player.status === "ACTIVE" && touchesHomePole(player) && !this.poleHolders[player.teamId]) this.poleHolders[player.teamId] = player.id;
     player.ready = false;
     const timer = this.captainReassignTimers[player.teamId];
     if (timer) clearTimeout(timer);
@@ -153,7 +142,7 @@ export class ArenaRoom extends Room {
     for (const timer of Object.values(this.captainReassignTimers)) if (timer) clearTimeout(timer);
   }
 
-  authorizeVoiceCredential(credential: string): VoiceIdentity | undefined {
+  authorizeVoiceCredential(credential: string, channel: VoiceChannel = "TEAM"): VoiceIdentity | undefined {
     const [payload, signature, extra] = credential.split(".");
     if (!payload || !signature || extra !== undefined) return undefined;
     const expected = createHmac("sha256", VOICE_CREDENTIAL_SECRET).update(payload).digest();
@@ -169,7 +158,9 @@ export class ArenaRoom extends Room {
       playerId: player.id,
       nickname: player.nickname,
       teamId: player.teamId,
-      roomName: `${this.roomId}:round-${this.roundNumber}:${player.teamId}`,
+      roomName: channel === "TEAM"
+        ? `${this.roomId}:round-${this.roundNumber}:${player.teamId}`
+        : `${this.roomId}:round-${this.roundNumber}:GLOBAL`,
     };
   }
 
@@ -182,13 +173,14 @@ export class ArenaRoom extends Room {
     const blueCount = this.countTeam("BLUE");
     const redCount = this.countTeam("RED");
     const teamId: TeamId = blueCount <= redCount ? "BLUE" : "RED";
-    const base = TEAM_BASES[teamId];
     const player: ServerPlayer = {
       id: crypto.randomUUID(), nickname, teamId,
-      x: base.x + base.width / 2, y: base.y + 65 + Math.min(blueCount, redCount) * 65,
+      x: TEAM_SPAWNS[teamId].x, y: TEAM_SPAWNS[teamId].y + Math.min(blueCount, redCount) * TEAM_SPAWN_SPACING,
       dx: 0, dy: 0, lastSequence: -1, ready: false, joinOrder: this.joinOrder++,
-      startingPoints: undefined, points: 0, status: "ACTIVE", linkedPlayerId: undefined,
+      startingPoints: undefined, points: 0, status: "ACTIVE", inactiveUntil: 0, frozenUntil: 0,
+      lastAppliedSequence: -1, pendingMoves: [], linkedPlayerId: undefined,
       connected: true, statusBeforeDisconnect: undefined, voiceCredential: undefined, voiceCredentialExpiresAt: 0, voiceCredentialRoomName: undefined,
+      reconnectUntil: undefined,
       pickupsCollected: 0, battlesWon: 0, raidsCompleted: 0,
     };
     this.players.set(client.sessionId, player);
@@ -199,21 +191,21 @@ export class ArenaRoom extends Room {
   override onLeave(client: Client): void {
     const player = this.players.get(client.sessionId);
     if (!player) return;
-    player.connected = false;
+    disconnectPlayer(player, undefined);
+    this.breakLink(player);
+    this.cancelRaidFor(player.id);
+    releasePole(player, this.poleHolders);
     if (this.phase === "PLAYING" || this.phase === "RESULTS") {
-      player.status = "DISCONNECTED";
-      player.dx = 0;
-      player.dy = 0;
-      this.breakLink(player);
-      this.cancelRaidFor(player.id);
-      if (this.phase === "PLAYING") this.sendSnapshots();
+      if (this.hostPlayerId === player.id) this.hostPlayerId = oldestConnectedPlayerId(this.players.values());
+      if (this.captainIds[player.teamId] === player.id) this.scheduleCaptainReassignment(player);
+      this.sendSnapshots();
       return;
     }
 
     this.players.delete(client.sessionId);
     if (this.captainIds[player.teamId] === player.id) this.captainIds[player.teamId] = undefined;
     if (this.hostPlayerId === player.id) {
-      this.hostPlayerId = [...this.players.values()].sort((left, right) => left.joinOrder - right.joinOrder)[0]?.id;
+      this.hostPlayerId = oldestConnectedPlayerId(this.players.values());
     }
     if (this.phase === "COUNTDOWN") {
       this.phase = "LOBBY";
@@ -240,11 +232,11 @@ export class ArenaRoom extends Room {
     if (this.phase !== "PLAYING") return;
     const player = this.players.get(client.sessionId);
     const parsed = clientCommandSchema.safeParse(payload);
-    if (!player || player.status === "DISCONNECTED" || !parsed.success || parsed.data.type !== "move") return;
+    if (!player || (player.status !== "ACTIVE" && player.status !== "INACTIVE") || !parsed.success || parsed.data.type !== "move") return;
     if (parsed.data.seq <= player.lastSequence) return;
+    if (player.pendingMoves.length >= 12) return;
     player.lastSequence = parsed.data.seq;
-    player.dx = parsed.data.dx;
-    player.dy = parsed.data.dy;
+    player.pendingMoves.push(parsed.data);
   }
 
   private receiveCommand(client: Client, payload: unknown): void {
@@ -257,6 +249,7 @@ export class ArenaRoom extends Room {
     }
     try {
       if (this.phase === "PLAYING") {
+        if (player.status === "ELIMINATED") throw new Error("Eliminated players are spectators for the rest of this round.");
         switch (parsed.data.type) {
           case "interact": this.setInteraction(player, parsed.data.active !== false); break;
           case "linkStart": this.startLink(player, parsed.data.teammateId); break;
@@ -293,13 +286,12 @@ export class ArenaRoom extends Room {
   private chooseTeam(player: ServerPlayer, teamId: TeamId): void {
     if (this.phase !== "LOBBY" || this.allocationComplete) throw new Error("Teams are locked after allocation begins.");
     if (player.teamId === teamId) return;
-    if (this.countTeam(teamId) >= GAME_RULES.teamSize) throw new Error("That crew is full.");
+    if (this.countTeam(teamId) >= this.playersPerTeam) throw new Error("That crew is full.");
     if (this.captainIds[player.teamId] === player.id) this.captainIds[player.teamId] = undefined;
     player.teamId = teamId;
-    const base = TEAM_BASES[teamId];
     const slot = this.countTeam(teamId) - 1;
-    player.x = base.x + base.width / 2;
-    player.y = base.y + 65 + Math.max(0, slot) * 65;
+    player.x = TEAM_SPAWNS[teamId].x;
+    player.y = TEAM_SPAWNS[teamId].y + Math.max(0, slot) * TEAM_SPAWN_SPACING;
     this.resetReadyState();
   }
 
@@ -316,14 +308,14 @@ export class ArenaRoom extends Room {
   private beginAllocation(player: ServerPlayer): void {
     if (player.id !== this.hostPlayerId) throw new Error("Only the host can open point allocation.");
     if (this.phase !== "LOBBY" || this.allocationComplete) throw new Error("Point allocation cannot start right now.");
-    if (this.countTeam("BLUE") !== GAME_RULES.teamSize || this.countTeam("RED") !== GAME_RULES.teamSize) {
-      throw new Error("Both crews need five players before allocation can begin.");
+    if (this.countTeam("BLUE") !== this.playersPerTeam || this.countTeam("RED") !== this.playersPerTeam) {
+      throw new Error(`Both crews need ${this.playersPerTeam} player${this.playersPerTeam === 1 ? "" : "s"} before allocation can begin.`);
     }
     if (!this.captainIds.BLUE || !this.captainIds.RED) throw new Error("Choose one captain for each crew first.");
     this.phase = "ALLOCATION";
     this.allocationLocked.BLUE = false;
     this.allocationLocked.RED = false;
-    for (const teammate of this.players.values()) teammate.startingPoints = GAME_RULES.startingTeamPoints / GAME_RULES.teamSize;
+    for (const teammate of this.players.values()) teammate.startingPoints = GAME_RULES.startingTeamPoints / this.playersPerTeam;
   }
 
   private allocatePoints(player: ServerPlayer, pointsByPlayerId: Record<string, number>): void {
@@ -333,11 +325,11 @@ export class ArenaRoom extends Room {
     const teammates = [...this.players.values()].filter((candidate) => candidate.teamId === player.teamId);
     const playerIds = new Set(teammates.map((teammate) => teammate.id));
     const entries = Object.entries(pointsByPlayerId);
-    const shapeValid = entries.length === GAME_RULES.teamSize && entries.every(([id]) => playerIds.has(id));
+    const shapeValid = entries.length === this.playersPerTeam && entries.every(([id]) => playerIds.has(id));
     const total = entries.reduce((sum, [, points]) => sum + points, 0);
-    const valuesValid = entries.every(([, points]) => Number.isInteger(points) && points >= 0 && points % GAME_RULES.allocationIncrement === 0);
+    const valuesValid = entries.every(([, points]) => Number.isInteger(points) && points >= GAME_RULES.minimumStartingPointsPerPlayer && points % GAME_RULES.allocationIncrement === 0);
     if (!shapeValid || !valuesValid || total !== GAME_RULES.startingTeamPoints) {
-      throw new Error("Allocate exactly 10,000 points in 100 point increments across your five players.");
+      throw new Error(`Allocate exactly 10,000 points in 100 point increments, with at least 500 per player.`);
     }
     for (const teammate of teammates) teammate.startingPoints = pointsByPlayerId[teammate.id]!;
   }
@@ -348,8 +340,8 @@ export class ArenaRoom extends Room {
     if (this.allocationLocked[player.teamId]) return;
     const teammates = [...this.players.values()].filter((candidate) => candidate.teamId === player.teamId);
     const values = teammates.map((teammate) => teammate.startingPoints);
-    if (values.some((points) => points === undefined) || values.reduce<number>((sum, points) => sum + (points ?? 0), 0) !== GAME_RULES.startingTeamPoints) {
-      throw new Error("Your allocation must total exactly 10,000 points before locking.");
+    if (values.some((points) => points === undefined || points < GAME_RULES.minimumStartingPointsPerPlayer) || values.reduce<number>((sum, points) => sum + (points ?? 0), 0) !== GAME_RULES.startingTeamPoints) {
+      throw new Error("Your allocation must total exactly 10,000 points, with at least 500 per player, before locking.");
     }
     this.allocationLocked[player.teamId] = true;
     if (this.allocationLocked.BLUE && this.allocationLocked.RED) {
@@ -367,10 +359,13 @@ export class ArenaRoom extends Room {
   private startCountdown(player: ServerPlayer): void {
     if (player.id !== this.hostPlayerId) throw new Error("Only the host can start the match.");
     if (this.phase !== "LOBBY" || !this.allocationComplete) throw new Error("Both allocations must be locked first.");
-    if (this.clients.length !== GAME_RULES.teamSize * 2) throw new Error("All ten players must be connected to start.");
-    if (this.countTeam("BLUE") !== GAME_RULES.teamSize || this.countTeam("RED") !== GAME_RULES.teamSize) throw new Error("Each crew needs exactly five players to start.");
+    if (this.clients.length !== this.playersPerTeam * 2) throw new Error(`All ${this.playersPerTeam * 2} players must be connected to start.`);
+    if (this.countTeam("BLUE") !== this.playersPerTeam || this.countTeam("RED") !== this.playersPerTeam) throw new Error(`Each crew needs exactly ${this.playersPerTeam} player${this.playersPerTeam === 1 ? "" : "s"} to start.`);
     if (!this.captainIds.BLUE || !this.captainIds.RED) throw new Error("Both crews need a captain to start.");
     if ([...this.players.values()].some((candidate) => !candidate.ready)) throw new Error("Every player must be ready before the host can start.");
+    if ([...this.players.values()].some((candidate) => candidate.startingPoints === undefined || candidate.startingPoints < GAME_RULES.minimumStartingPointsPerPlayer)) {
+      throw new Error("Every player must start with at least 500 points.");
+    }
     this.phase = "COUNTDOWN";
     this.countdownDeadline = performance.now() + GAME_RULES.countdownSeconds * 1_000;
     this.lock();
@@ -434,12 +429,16 @@ export class ArenaRoom extends Room {
 
   private startMatch(): void {
     this.roundNumber += 1;
+    this.gameEventSequence = 0;
     this.phase = "PLAYING";
     this.countdownDeadline = undefined;
     const now = performance.now();
     this.matchDeadline = now + GAME_RULES.matchDurationSeconds * 1_000;
     this.pickups = generatePickupLocations(this.roomId.split("").reduce((seed, char) => Math.imul(seed ^ char.charCodeAt(0), 16777619), 2166136261));
     this.activeContactPairs.clear();
+    this.poleHolders.BLUE = undefined;
+    this.poleHolders.RED = undefined;
+    this.resultWinnerOverride = null;
     this.activeRaids.BLUE = undefined;
     this.activeRaids.RED = undefined;
     this.raidCooldownUntil.BLUE = 0;
@@ -448,7 +447,10 @@ export class ArenaRoom extends Room {
     for (const player of this.players.values()) {
       player.points = player.startingPoints ?? 0;
       player.status = "ACTIVE";
-      player.dx = 0; player.dy = 0; player.linkedPlayerId = undefined;
+      player.inactiveUntil = 0;
+      player.frozenUntil = 0;
+      player.dx = 0; player.dy = 0; player.lastSequence = -1; player.lastAppliedSequence = -1;
+      player.pendingMoves.length = 0; player.linkedPlayerId = undefined;
       player.pickupsCollected = 0; player.battlesWon = 0; player.raidsCompleted = 0;
     }
     this.sendLobbySnapshots(true);
@@ -461,118 +463,88 @@ export class ArenaRoom extends Room {
       this.finishMatch();
       return;
     }
-    for (const player of this.players.values()) {
-      if (player.status === "DISCONNECTED") continue;
-      const magnitude = Math.hypot(player.dx, player.dy);
-      if (magnitude > 0) {
-        const distance = (MOVEMENT_CONFIG.speed * dt) / magnitude;
-        const nextX = player.x + player.dx * distance;
-        if (this.isPositionFree(nextX, player.y)) player.x = nextX;
-        const nextY = player.y + player.dy * distance;
-        if (this.isPositionFree(player.x, nextY)) player.y = nextY;
-      }
+    for (const player of [...this.players.values()].sort((a, b) => a.id.localeCompare(b.id))) {
+      movePlayer(player, dt, this.poleHolders, now);
     }
     this.validateLinks();
-    this.rearmPlayers();
+    this.rearmPlayers(now);
+    this.reconcilePoleHolders();
     this.collectPickups();
     this.advanceRaids(now);
     this.resolveContacts();
+    this.finishIfTeamEliminated();
     this.sendSnapshots();
   }
 
   private resetPositions(): void {
     for (const teamId of ["BLUE", "RED"] as const) {
-      const base = TEAM_BASES[teamId];
       const teammates = [...this.players.values()].filter((player) => player.teamId === teamId).sort((a, b) => a.joinOrder - b.joinOrder);
-      teammates.forEach((player, index) => { player.x = base.x + base.width / 2; player.y = base.y + 65 + index * 65; });
+      teammates.forEach((player, index) => {
+        player.x = TEAM_SPAWNS[teamId].x;
+        player.y = TEAM_SPAWNS[teamId].y + index * TEAM_SPAWN_SPACING;
+      });
     }
   }
 
   private startLink(player: ServerPlayer, teammateId: string): void {
-    const teammate = this.findById(teammateId);
-    if (!teammate || teammate.id === player.id || player.status !== "ACTIVE" || teammate.status !== "ACTIVE") throw new Error("Both crewmates must be active to link.");
-    if (teammate.teamId !== player.teamId) throw new Error("You can only link with your own crew.");
-    if (player.linkedPlayerId || teammate.linkedPlayerId) throw new Error("A linked crewmate can only have one link.");
-    if (!this.withinLinkRange(player, teammate)) throw new Error("Move closer and keep a clear line of sight to link.");
-    player.linkedPlayerId = teammate.id;
-    teammate.linkedPlayerId = player.id;
+    startLinkSystem(player, this.findById(teammateId), (first, second) => this.withinLinkRange(first, second));
   }
 
   private breakLink(player: ServerPlayer): void {
-    const linked = player.linkedPlayerId ? this.findById(player.linkedPlayerId) : undefined;
-    player.linkedPlayerId = undefined;
-    if (linked?.linkedPlayerId === player.id) linked.linkedPlayerId = undefined;
+    breakLinkSystem(player, (id) => this.findById(id));
   }
 
   private validateLinks(): void {
-    for (const player of this.players.values()) {
-      if (!player.linkedPlayerId) continue;
-      const linked = this.findById(player.linkedPlayerId);
-      if (!linked) {
-        this.breakLink(player);
-        continue;
-      }
-      if (player.id > linked.id) continue;
-      if (player.status !== "ACTIVE" || linked.status !== "ACTIVE" || !this.withinLinkRange(player, linked)) this.breakLink(player);
-    }
+    validateLinks(this.players.values(), (id) => this.findById(id), (first, second) => this.withinLinkRange(first, second));
   }
 
   private withinLinkRange(first: ServerPlayer, second: ServerPlayer): boolean {
-    return Math.hypot(first.x - second.x, first.y - second.y) <= MOVEMENT_CONFIG.linkRadius && hasLineOfSight(first, second);
+    return withinLinkRange(first, second);
   }
 
   private setInteraction(player: ServerPlayer, active: boolean): void {
-    const enemyTeam: TeamId = player.teamId === "BLUE" ? "RED" : "BLUE";
-    const raid = this.activeRaids[player.teamId];
-    if (!active) {
-      if (raid?.playerId === player.id) this.activeRaids[player.teamId] = undefined;
-      return;
-    }
-    if (player.status !== "ACTIVE") throw new Error("Only active players can start a base raid.");
-    if (this.activeRaids[player.teamId]) throw new Error("Your crew already has an active raid.");
-    if (performance.now() < this.raidCooldownUntil[player.teamId]) throw new Error("Your crew's raid is cooling down.");
-    if (!this.isInsideBase(player, TEAM_BASES[enemyTeam])) throw new Error("Move inside the enemy base to start a raid.");
-    this.activeRaids[player.teamId] = { playerId: player.id, startedAt: performance.now() };
+    const existing = this.activeRaids[player.teamId];
+    setRaid(player, active, this.activeRaids, this.raidCooldownUntil, performance.now(),
+      (candidate, teamId) => this.isInsideBase(candidate, TEAM_BASES[teamId]));
+    const current = this.activeRaids[player.teamId];
+    if (!existing && current?.playerId === player.id) this.emitRaidFeedback(player, "STARTED");
+    if (!active && existing?.playerId === player.id && !current) this.emitRaidFeedback(player, "INTERRUPTED");
   }
 
   private advanceRaids(now: number): void {
-    for (const teamId of ["BLUE", "RED"] as const) {
-      const raid = this.activeRaids[teamId];
-      if (!raid) continue;
-      const raider = this.findById(raid.playerId);
-      const enemyTeam: TeamId = teamId === "BLUE" ? "RED" : "BLUE";
-      if (!raider || raider.status !== "ACTIVE" || !this.isInsideBase(raider, TEAM_BASES[enemyTeam])) {
-        this.activeRaids[teamId] = undefined;
-        continue;
-      }
-      if (now - raid.startedAt >= GAME_RULES.raidChannelSeconds * 1_000) {
-        raider.points += GAME_RULES.raidReward;
-        raider.raidsCompleted += 1;
-        this.raidCooldownUntil[teamId] = now + GAME_RULES.raidCooldownSeconds * 1_000;
-        this.activeRaids[teamId] = undefined;
-      }
+    const resolutions = advanceRaidsSystem(this.activeRaids, this.raidCooldownUntil, now, (id) => this.findById(id),
+      (candidate, teamId) => this.isInsideBase(candidate, TEAM_BASES[teamId]));
+    for (const resolution of resolutions) {
+      const raider = this.findById(resolution.playerId);
+      if (raider) this.emitRaidFeedback(raider, resolution.stage);
     }
   }
 
   private cancelRaidFor(playerId: string): void {
-    for (const teamId of ["BLUE", "RED"] as const) if (this.activeRaids[teamId]?.playerId === playerId) this.activeRaids[teamId] = undefined;
+    const raid = (["BLUE", "RED"] as const).map((teamId) => ({ teamId, raid: this.activeRaids[teamId] }))
+      .find(({ raid: active }) => active?.playerId === playerId);
+    const raider = raid ? this.findById(playerId) : undefined;
+    if (raid && raider) this.emitRaidFeedback(raider, "INTERRUPTED");
+    cancelRaid(playerId, this.activeRaids);
   }
 
   private collectPickups(): void {
-    for (const player of [...this.players.values()].sort((a, b) => a.id.localeCompare(b.id))) {
-      if (player.status !== "ACTIVE") continue;
-      const index = this.pickups.findIndex((pickup) => Math.hypot(player.x - pickup.x, player.y - pickup.y) <= PLAYER_RADIUS + PICKUP_RADIUS);
-      if (index < 0) continue;
-      this.pickups.splice(index, 1);
-      player.points += GAME_RULES.pickupReward;
+    const result = collectPickups(this.players.values(), this.pickups);
+    this.pickups = result.remainingPickups;
+    for (const event of result.collections) {
+      const player = this.findById(event.playerId);
+      if (!player) continue;
+      player.points += event.points;
       player.pickupsCollected += 1;
     }
   }
 
-  private rearmPlayers(): void {
-    for (const player of this.players.values()) {
-      if (player.status === "INACTIVE" && this.isInsideBase(player, TEAM_BASES[player.teamId])) player.status = "ACTIVE";
-    }
+  private rearmPlayers(now = performance.now()): void {
+    rearmPlayersSystem(this.players.values(), now);
+  }
+
+  private reconcilePoleHolders(): void {
+    reconcilePoleHoldersSystem(this.players.values(), this.poleHolders, (id) => this.findById(id));
   }
 
   private resolveContacts(): void {
@@ -586,57 +558,112 @@ export class ArenaRoom extends Room {
         if (first.teamId === second.teamId || Math.hypot(first.x - second.x, first.y - second.y) > PLAYER_RADIUS * 2) continue;
         const contactKey = this.pairKey(first.id, second.id);
         currentContacts.add(contactKey);
-        if (this.activeContactPairs.has(contactKey) || first.status !== "ACTIVE" || second.status !== "ACTIVE") continue;
-        const firstGroup = this.combatGroup(first);
-        const secondGroup = this.combatGroup(second);
+        if (this.activeContactPairs.has(contactKey)) continue;
+        const resolution = resolveContact(first, second, this.poleHolders, (id) => this.findById(id));
+        if (resolution.kind === "ELIMINATE_ATTACKER") {
+          const attacker = resolution.attacker;
+          const holder = resolution.holder;
+          this.eliminatePlayer(resolution.attacker);
+          this.sendGameEvent({
+            type: "poleElimination",
+            eventId: this.nextGameEventId(),
+            attacker: { playerId: attacker.id, teamId: attacker.teamId, x: attacker.x, y: attacker.y },
+            holder: { playerId: holder.id, teamId: holder.teamId, x: holder.x, y: holder.y },
+          }, [attacker.id, holder.id]);
+          continue;
+        }
+        if (resolution.kind === "FREEZE_PLAYER") {
+          freezeMovementSystem(resolution.frozenPlayer, performance.now());
+          continue;
+        }
+        if (resolution.kind !== "BATTLE") continue;
+        const { firstGroup, secondGroup } = resolution;
         const matchupKey = [firstGroup.map((p) => p.id).sort().join(","), secondGroup.map((p) => p.id).sort().join(",")].sort().join("|");
         if (resolvedGroupPairs.has(matchupKey)) continue;
         resolvedGroupPairs.add(matchupKey);
-        this.resolveBattle(first, second, firstGroup, secondGroup);
+        this.resolveBattle(firstGroup, secondGroup);
       }
     }
     this.activeContactPairs.clear();
     for (const key of currentContacts) this.activeContactPairs.add(key);
   }
 
-  private resolveBattle(first: ServerPlayer, second: ServerPlayer, firstGroup: ServerPlayer[], secondGroup: ServerPlayer[]): void {
-    const protectedDefender = [first, second].find((player) => this.isInsideBase(player, TEAM_BASES[player.teamId]));
-    if (protectedDefender) {
-      const attackerGroup = protectedDefender === first ? secondGroup : firstGroup;
-      for (const attacker of attackerGroup) {
-        attacker.status = "INACTIVE";
-        attacker.dx = 0; attacker.dy = 0;
-        this.breakLink(attacker);
-        this.cancelRaidFor(attacker.id);
-      }
-      return;
-    }
-    const settlement = settleBattle(
-      firstGroup.map((player) => ({ id: player.id, points: player.points })),
-      secondGroup.map((player) => ({ id: player.id, points: player.points })),
-      GAME_RULES.battleTransfer,
-    );
+  private resolveBattle(firstGroup: ServerPlayer[], secondGroup: ServerPlayer[]): void {
+    const now = performance.now();
+    const settlement = settleGroups(firstGroup, secondGroup, GAME_RULES.battleTransfer);
     for (const [id, points] of Object.entries(settlement.winnerPoints)) this.findById(id)!.points += points;
     for (const [id, points] of Object.entries(settlement.loserPoints)) this.findById(id)!.points -= points;
     if (!settlement.tied) for (const id of settlement.winnerIds) this.findById(id)!.battlesWon += 1;
-    for (const participant of [...firstGroup, ...secondGroup]) {
-      participant.status = "INACTIVE";
-      participant.dx = 0; participant.dy = 0;
-      this.breakLink(participant);
-      this.cancelRaidFor(participant.id);
+    const winners = new Set(settlement.winnerIds);
+    const participants = [...firstGroup, ...secondGroup];
+    const eventParticipants: Extract<GameEvent, { type: "battleResolved" }> ["participants"] = [];
+    for (const participant of participants) {
+      if (participant.points <= 0) {
+        this.eliminatePlayer(participant);
+      } else {
+        this.makeInactive(participant, now);
+      }
+      eventParticipants.push({
+        playerId: participant.id,
+        teamId: participant.teamId,
+        x: participant.x,
+        y: participant.y,
+        outcome: participant.status === "ELIMINATED" ? "ELIMINATED" : settlement.tied ? "TIE" : winners.has(participant.id) ? "WIN" : "LOSS",
+      });
+    }
+    this.sendGameEvent({ type: "battleResolved", eventId: this.nextGameEventId(), participants: eventParticipants }, participants.map(({ id }) => id));
+  }
+
+  private makeInactive(player: ServerPlayer, now: number): void {
+    this.cancelRaidFor(player.id);
+    makeInactiveSystem(player, now, (id) => this.findById(id), this.activeRaids, this.poleHolders);
+  }
+
+  private eliminatePlayer(player: ServerPlayer): void {
+    this.cancelRaidFor(player.id);
+    eliminatePlayerSystem(player, (id) => this.findById(id), this.activeRaids, this.poleHolders);
+  }
+
+  private emitRaidFeedback(player: ServerPlayer, stage: "STARTED" | "INTERRUPTED" | "COMPLETED"): void {
+    this.sendGameEvent({
+      type: "raidFeedback",
+      eventId: this.nextGameEventId(),
+      stage,
+      raiderPlayerId: player.id,
+      teamId: player.teamId,
+      baseTeamId: opponentTeam(player.teamId),
+    }, [player.id]);
+  }
+
+  private sendGameEvent(event: GameEvent, recipientIds: readonly string[]): void {
+    const payload = gameEventSchema.parse(event);
+    const recipients = new Set(recipientIds);
+    for (const client of this.clients) {
+      const player = this.players.get(client.sessionId);
+      if (player && recipients.has(player.id)) client.send("gameEvent", payload);
     }
   }
 
-  private combatGroup(player: ServerPlayer): ServerPlayer[] {
-    const linked = player.linkedPlayerId ? this.findById(player.linkedPlayerId) : undefined;
-    return linked?.status === "ACTIVE" ? [player, linked].sort((a, b) => a.id.localeCompare(b.id)) : [player];
+  private nextGameEventId(): string {
+    this.gameEventSequence += 1;
+    return `${this.roundNumber}:${this.gameEventSequence}`;
   }
 
-  private finishMatch(): void {
+  private finishIfTeamEliminated(): void {
+    const winner = eliminatedTeamWinner(this.players.values());
+    if (winner) this.finishMatch(winner);
+  }
+
+  private finishMatch(winnerOverride: TeamId | null = null): void {
     this.phase = "RESULTS";
+    this.resultWinnerOverride = winnerOverride;
     this.matchDeadline = undefined;
-    this.activeRaids.BLUE = undefined;
-    this.activeRaids.RED = undefined;
+    for (const teamId of ["BLUE", "RED"] as const) {
+      const raid = this.activeRaids[teamId];
+      const raider = raid ? this.findById(raid.playerId) : undefined;
+      if (raider) this.emitRaidFeedback(raider, "INTERRUPTED");
+      this.activeRaids[teamId] = undefined;
+    }
     for (const player of this.players.values()) { player.dx = 0; player.dy = 0; }
     this.sendSnapshots();
   }
@@ -647,13 +674,28 @@ export class ArenaRoom extends Room {
     this.matchDeadline = undefined;
     this.pickups = [];
     this.activeContactPairs.clear();
+    this.poleHolders.BLUE = undefined;
+    this.poleHolders.RED = undefined;
+    this.resultWinnerOverride = null;
     this.activeRaids.BLUE = undefined; this.activeRaids.RED = undefined;
     this.raidCooldownUntil.BLUE = 0; this.raidCooldownUntil.RED = 0;
     this.allocationComplete = false;
     this.allocationLocked.BLUE = false; this.allocationLocked.RED = false;
+    purgeDisconnectedPlayersForRematch(this.players, performance.now());
+    for (const teamId of ["BLUE", "RED"] as const) {
+      const captain = this.findById(this.captainIds[teamId] ?? "");
+      if (!captain?.connected) this.captainIds[teamId] = undefined;
+    }
+    if (!this.findById(this.hostPlayerId ?? "")?.connected) this.hostPlayerId = oldestConnectedPlayerId(this.players.values());
     this.resetPositions();
     for (const member of this.players.values()) {
-      member.status = "ACTIVE"; member.points = 0; member.startingPoints = undefined;
+      if (member.connected) member.status = "ACTIVE";
+      else {
+        member.status = "DISCONNECTED";
+        member.statusBeforeDisconnect = "ACTIVE";
+      }
+      member.points = 0; member.startingPoints = undefined;
+      member.inactiveUntil = 0; member.frozenUntil = 0; member.lastSequence = -1; member.lastAppliedSequence = -1; member.pendingMoves.length = 0;
       member.linkedPlayerId = undefined; member.ready = false; member.dx = 0; member.dy = 0;
       member.pickupsCollected = 0; member.battlesWon = 0; member.raidsCompleted = 0;
     }
@@ -667,19 +709,9 @@ export class ArenaRoom extends Room {
   private findById(id: string): ServerPlayer | undefined { return [...this.players.values()].find((player) => player.id === id); }
   private pairKey(first: string, second: string): string { return [first, second].sort().join("|"); }
 
-  private isPositionFree(x: number, y: number): boolean {
-    if (x < PLAYER_RADIUS || y < PLAYER_RADIUS || x > ARENA_CONFIG.width - PLAYER_RADIUS || y > ARENA_CONFIG.height - PLAYER_RADIUS) return false;
-    return ARENA_OBSTACLES.every((obstacle) => {
-      const nearestX = Math.max(obstacle.x, Math.min(x, obstacle.x + obstacle.width));
-      const nearestY = Math.max(obstacle.y, Math.min(y, obstacle.y + obstacle.height));
-      const dx = x - nearestX; const dy = y - nearestY;
-      return dx * dx + dy * dy >= PLAYER_RADIUS * PLAYER_RADIUS;
-    });
-  }
-
   private sendLobbySnapshots(force = false): void {
     if (!force && (this.phase === "PLAYING" || this.phase === "RESULTS")) return;
-    const connectedPlayerCount = this.clients.length;
+    const connectedPlayerCount = countConnectedPlayers(this.players.values());
     for (const client of this.clients) {
       const self = this.players.get(client.sessionId);
       if (!self || !this.hostPlayerId) continue;
@@ -690,7 +722,7 @@ export class ArenaRoom extends Room {
         ...(candidate.teamId === self.teamId && candidate.startingPoints !== undefined ? { startingPoints: candidate.startingPoints } : {}),
       }));
       client.send("lobbySnapshot", lobbySnapshotSchema.parse({
-        roomCode: this.roomId, phase: this.phase, selfPlayerId: self.id, voiceCredential: this.voiceCredentialFor(self), voiceRoomName: `${this.roomId}:round-${this.roundNumber}:${self.teamId}`, hostPlayerId: this.hostPlayerId,
+        roomCode: this.roomId, roomMode: this.roomMode, teamSize: this.playersPerTeam, phase: this.phase, selfPlayerId: self.id, voiceCredential: this.voiceCredentialFor(self), voiceRoomName: `${this.roomId}:round-${this.roundNumber}:${self.teamId}`, hostPlayerId: this.hostPlayerId,
         connectedPlayerCount, players,
         captainIds: { BLUE: this.captainIds.BLUE ?? null, RED: this.captainIds.RED ?? null },
         ownTeamAllocation: teammates.map((teammate) => ({ playerId: teammate.id, points: teammate.startingPoints ?? null })),
@@ -701,45 +733,29 @@ export class ArenaRoom extends Room {
   }
 
   private sendSnapshots(): void {
-    const connectedPlayerCount = this.clients.length;
-    const teamScores = {
-      BLUE: [...this.players.values()].filter((player) => player.teamId === "BLUE").reduce((sum, player) => sum + player.points, 0),
-      RED: [...this.players.values()].filter((player) => player.teamId === "RED").reduce((sum, player) => sum + player.points, 0),
-    };
-    const result = this.phase === "RESULTS" ? {
-      winnerTeam: teamScores.BLUE === teamScores.RED ? null : teamScores.BLUE > teamScores.RED ? "BLUE" as const : "RED" as const,
-      teamScores,
-      players: [...this.players.values()].map((player) => ({
-        id: player.id, nickname: player.nickname, teamId: player.teamId, points: player.points,
-        pickupsCollected: player.pickupsCollected, battlesWon: player.battlesWon, raidsCompleted: player.raidsCompleted,
-      })).sort((a, b) => b.points - a.points || a.id.localeCompare(b.id)),
-    } : null;
+    const now = performance.now();
+    const connectedPlayerCount = countConnectedPlayers(this.players.values());
     for (const client of this.clients) {
       const self = this.players.get(client.sessionId);
       if (!self) continue;
-      const players: PlayerSnapshot[] = [];
-      for (const candidate of this.players.values()) {
-        const isSelfOrTeammate = candidate.id === self.id || candidate.teamId === self.teamId;
-        const distance = Math.hypot(candidate.x - self.x, candidate.y - self.y);
-        const isSpottedEnemy = candidate.teamId !== self.teamId && candidate.status !== "DISCONNECTED" && distance <= MOVEMENT_CONFIG.viewRadius && hasLineOfSight(self, candidate);
-        if (!isSelfOrTeammate && !isSpottedEnemy) continue;
-        players.push({
-          id: candidate.id, nickname: candidate.nickname, teamId: candidate.teamId, status: candidate.status,
-          x: candidate.x, y: candidate.y,
-          ...(candidate.teamId === self.teamId ? { points: candidate.points } : {}),
-          ...(candidate.teamId === self.teamId && candidate.linkedPlayerId ? { linkedPlayerId: candidate.linkedPlayerId } : {}),
-        });
-      }
       const ownRaid = this.activeRaids[self.teamId];
-      const selfRaid = ownRaid?.playerId
-        ? { progressSeconds: Math.min(GAME_RULES.raidChannelSeconds, (performance.now() - ownRaid.startedAt) / 1_000), cooldownSecondsRemaining: remainingSeconds(this.raidCooldownUntil[self.teamId], performance.now()) }
-        : { progressSeconds: 0, cooldownSecondsRemaining: remainingSeconds(this.raidCooldownUntil[self.teamId], performance.now()) };
-      client.send("snapshot", roomSnapshotSchema.parse({
+      const snapshot = projectSnapshot({
         phase: this.phase === "RESULTS" ? "RESULTS" : "PLAYING",
-        selfPlayerId: self.id, connectedPlayerCount, serverTime: Date.now(),
-        remainingSeconds: this.phase === "RESULTS" || this.matchDeadline === undefined ? 0 : remainingSeconds(this.matchDeadline, performance.now()),
-        players, teamScores, pickups: this.pickups, selfRaid, result,
-      }));
+        teamSize: this.playersPerTeam,
+        ...(this.hostPlayerId ? { hostPlayerId: this.hostPlayerId } : {}),
+        self,
+        players: [...this.players.values()],
+        connectedPlayerCount,
+        serverTime: Date.now(),
+        now,
+        remainingSeconds: this.phase === "RESULTS" || this.matchDeadline === undefined ? 0 : remainingSeconds(this.matchDeadline, now),
+        pickups: this.pickups,
+        raidStartedAt: ownRaid?.playerId === self.id ? ownRaid.startedAt : undefined,
+        raidCooldownUntil: this.raidCooldownUntil[self.teamId],
+        poleHolders: this.poleHolders,
+        winnerOverride: this.resultWinnerOverride,
+      });
+      client.send("snapshot", roomSnapshotSchema.parse(snapshot));
     }
   }
 }

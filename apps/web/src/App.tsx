@@ -4,7 +4,7 @@ import { LobbyScreen } from "./lobby/LobbyScreen";
 import { ArenaCanvas } from "./game/ArenaCanvas";
 import { ResultsScreen } from "./lobby/ResultsScreen";
 import { MultiplayerClient, type NetworkStatus } from "./net/MultiplayerClient";
-import type { LobbyCommand, LobbySnapshot, RoomSnapshot } from "@osmosis/shared";
+import type { LobbyCommand, LobbySnapshot, RoomMode, RoomSnapshot } from "@osmosis/shared";
 import { VoiceControls } from "./voice/VoiceControls";
 
 export function App() {
@@ -22,9 +22,11 @@ export function App() {
   const receiveLobbySnapshot = useCallback((snapshot: LobbySnapshot) => {
     setLobby(snapshot);
     if (snapshot.phase !== "PLAYING" && snapshot.phase !== "RESULTS") setRoomSnapshot(null);
-    const currentCode = new URLSearchParams(window.location.search).get("room");
+    const currentUrl = new URL(window.location.href);
+    const currentCode = currentUrl.searchParams.get("room");
     if (currentCode !== snapshot.roomCode) {
-      window.history.replaceState(null, "", `?room=${snapshot.roomCode}`);
+      currentUrl.searchParams.set("room", snapshot.roomCode);
+      window.history.replaceState(null, "", currentUrl);
     }
   }, []);
   const receiveNetworkStatus = useCallback((status: NetworkStatus) => {
@@ -68,10 +70,10 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [network]);
 
-  const createRoom = useCallback(async (nickname: string) => {
+  const createRoom = useCallback(async (nickname: string, roomMode: RoomMode) => {
     setError(undefined);
     try {
-      await network.createRoom(nickname);
+      await network.createRoom(nickname, roomMode);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Could not create a room.");
     }
@@ -101,10 +103,12 @@ export function App() {
 
   let screen;
   if (roomSnapshot?.phase === "RESULTS" && roomSnapshot.result) {
-    screen = <ResultsScreen result={roomSnapshot.result} lobby={lobby} error={error}
+    const fallbackHost = lobby?.players.find((player) => player.id === lobby.selfPlayerId)?.isHost ?? false;
+    const isHost = roomSnapshot.hostPlayerId ? roomSnapshot.hostPlayerId === roomSnapshot.selfPlayerId : fallbackHost;
+    screen = <ResultsScreen result={roomSnapshot.result} isHost={isHost} error={error}
       onRematch={() => network.sendCommand({ type: "rematch" })} onLeave={leaveRoom} />;
   } else if (lobby?.phase === "PLAYING" || roomSnapshot?.phase === "PLAYING") {
-    screen = <ArenaCanvas network={network} snapshot={roomSnapshot} error={error} onNetworkStatus={receiveNetworkStatus} />;
+    screen = <ArenaCanvas network={network} snapshot={roomSnapshot} error={error} onLeave={() => void leaveRoom()} onNetworkStatus={receiveNetworkStatus} />;
   } else screen = (
     <LobbyScreen
       lobby={lobby}
@@ -117,7 +121,8 @@ export function App() {
       onLeave={leaveRoom}
     />
   );
-  return <>{screen}{lobby && <VoiceControls roomCode={lobby.roomCode} voiceCredential={lobby.voiceCredential}
+  return <>{screen}{lobby && networkStatus.state === "connecting" && <div className="connection-banner" role="status">Reconnecting to your crew… your seat is reserved for 120 seconds.</div>}{lobby && <VoiceControls roomCode={lobby.roomCode} voiceCredential={lobby.voiceCredential}
     voiceRoomName={lobby.voiceRoomName} connected={networkStatus.state === "connected"}
+    inMatch={roomSnapshot?.phase === "PLAYING"}
     {...(networkStatus.teamId ? { teamId: networkStatus.teamId } : {})} />}</>;
 }

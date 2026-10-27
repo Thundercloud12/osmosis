@@ -8,7 +8,7 @@ export function createArenaGame(parent: HTMLElement, network: MultiplayerClient)
     type: Phaser.AUTO,
     parent,
     backgroundColor: "#315d68",
-    pixelArt: false,
+    pixelArt: true,
     render: {
       antialias: true,
       roundPixels: true,

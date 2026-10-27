@@ -2,13 +2,17 @@ export const GAME_RULES = {
   teamSize: 5,
   matchDurationSeconds: 900,
   startingTeamPoints: 10_000,
+  minimumStartingPointsPerPlayer: 500,
   allocationIncrement: 100,
   battleTransfer: 500,
+  inactiveContactFreezeSeconds: 3,
   pickupReward: 200,
   raidReward: 2_000,
   raidChannelSeconds: 3,
   raidCooldownSeconds: 90,
-  reconnectGraceSeconds: 60,
+  battleInactivitySeconds: 15,
+  hqPoleTouchRadius: 36,
+  reconnectGraceSeconds: 120,
   countdownSeconds: 5,
   simulationHz: 20,
   maxLinkGroupSize: 2,
@@ -22,8 +26,8 @@ export const MOVEMENT_CONFIG = {
 } as const;
 
 export const ARENA_CONFIG = {
-  width: 2_800,
-  height: 1_600,
+  width: 11_232,
+  height: 5_376,
   boundaryThickness: 48,
 } as const;
 

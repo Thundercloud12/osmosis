@@ -1,12 +1,17 @@
-import { Client, type Room } from "@colyseus/sdk";
+import { Client, MatchMakeError, type Room } from "@colyseus/sdk";
 import {
   lobbySnapshotSchema,
+  gameEventSchema,
   roomSnapshotSchema,
   type GameCommand,
+  type GameEvent,
   type LobbyCommand,
   type LobbySnapshot,
   type RoomSnapshot,
+  type RoomMode,
 } from "@osmosis/shared";
+import { dispatchSnapshotListeners, type SnapshotListener } from "./snapshotDispatch";
+import { clearReconnectToken, readReconnectToken, saveReconnectToken } from "./ReconnectTokenStorage";
 
 export type NetworkStatus = {
   state: "connecting" | "connected" | "disconnected" | "error";
@@ -16,7 +21,8 @@ export type NetworkStatus = {
 
 export class MultiplayerClient {
   private room: Room | undefined;
-  private readonly snapshotListeners = new Set<(snapshot: RoomSnapshot) => void>();
+  private readonly snapshotListeners = new Set<SnapshotListener>();
+  private readonly gameEventListeners = new Set<(event: GameEvent) => void>();
   private readonly lobbyListeners = new Set<(snapshot: LobbySnapshot) => void>();
   private readonly statusListeners = new Set<(status: NetworkStatus) => void>();
   private readonly errorListeners = new Set<(message: string) => void>();
@@ -28,8 +34,20 @@ export class MultiplayerClient {
 
   onSnapshot(listener: (snapshot: RoomSnapshot) => void): () => void {
     this.snapshotListeners.add(listener);
-    if (this.latestRoomSnapshot) listener(this.latestRoomSnapshot);
+    if (this.latestRoomSnapshot) {
+      try {
+        listener(this.latestRoomSnapshot);
+      } catch (error) {
+        this.snapshotListeners.delete(listener);
+        console.error("Snapshot listener failed during subscription and was removed", error);
+      }
+    }
     return () => this.snapshotListeners.delete(listener);
+  }
+
+  onGameEvent(listener: (event: GameEvent) => void): () => void {
+    this.gameEventListeners.add(listener);
+    return () => this.gameEventListeners.delete(listener);
   }
 
   onStatus(listener: (status: NetworkStatus) => void): () => void {
@@ -48,17 +66,23 @@ export class MultiplayerClient {
     return () => this.errorListeners.delete(listener);
   }
 
-  async createRoom(nickname: string): Promise<void> {
-    await this.connectRoom((client) => client.create("arena", { nickname }));
+  async createRoom(nickname: string, roomMode: RoomMode = "STANDARD"): Promise<void> {
+    await this.connectRoom((client) => client.create("arena", { nickname, roomMode }));
   }
 
   async joinRoom(roomCode: string, nickname: string): Promise<void> {
     const code = roomCode.toUpperCase();
-    const savedToken = sessionStorage.getItem(this.reconnectKey(code));
+    const savedToken = readReconnectToken(code);
     await this.connectRoom(async (client) => {
       if (savedToken) {
         try { return await client.reconnect(savedToken); }
-        catch { sessionStorage.removeItem(this.reconnectKey(code)); }
+        catch (error) {
+          if (error instanceof MatchMakeError) {
+            clearReconnectToken(code);
+            throw new Error("Your reconnect reservation has expired or is no longer available. Join the room again to request an open seat.");
+          }
+          throw new Error("Could not reach your room to reconnect. Check your connection and retry before the 120-second reservation ends.");
+        }
       }
       return client.joinById(code, { nickname });
     }, code);
@@ -84,11 +108,11 @@ export class MultiplayerClient {
     }
     this.room = room;
     const code = roomCode ?? room.roomId.toUpperCase();
-    const saveReconnectToken = () => sessionStorage.setItem(this.reconnectKey(code), room.reconnectionToken);
-    saveReconnectToken();
+    const saveCurrentReconnectToken = () => saveReconnectToken(code, room.reconnectionToken);
+    saveCurrentReconnectToken();
     room.onDrop(() => this.setStatus({ state: "connecting", connectedPlayerCount: this.status.connectedPlayerCount, ...(this.status.teamId ? { teamId: this.status.teamId } : {}) }));
     room.onReconnect(() => {
-      saveReconnectToken();
+      saveCurrentReconnectToken();
       this.setStatus({ state: "connected", connectedPlayerCount: this.status.connectedPlayerCount, ...(this.status.teamId ? { teamId: this.status.teamId } : {}) });
     });
     this.sequence = 0;
@@ -120,7 +144,20 @@ export class MultiplayerClient {
         connectedPlayerCount: snapshot.connectedPlayerCount,
         ...(self ? { teamId: self.teamId } : {}),
       });
-      for (const listener of this.snapshotListeners) listener(snapshot);
+      dispatchSnapshotListeners(this.snapshotListeners, snapshot, (error) => {
+        console.error("Snapshot listener failed and was removed", error);
+      });
+    });
+    room.onMessage("gameEvent", (payload: unknown) => {
+      const parsed = gameEventSchema.safeParse(payload);
+      if (!parsed.success) return;
+      for (const listener of this.gameEventListeners) {
+        try { listener(parsed.data); }
+        catch (error) {
+          this.gameEventListeners.delete(listener);
+          console.error("Game event listener failed and was removed", error);
+        }
+      }
     });
     room.onMessage("commandError", (payload: unknown) => {
       if (typeof payload !== "object" || payload === null || !("message" in payload)) return;
@@ -133,6 +170,11 @@ export class MultiplayerClient {
       if (this.room === room) {
         this.room = undefined;
         this.setStatus({ state: "disconnected", connectedPlayerCount: 0 });
+        if (!this.disposed) {
+          for (const listener of this.errorListeners) {
+            listener("Connection ended. Your seat is reserved for up to 120 seconds; reload or rejoin the room to reconnect.");
+          }
+        }
       }
     });
     this.setStatus({ state: "connected", connectedPlayerCount: 1 });
@@ -142,21 +184,26 @@ export class MultiplayerClient {
     this.room?.send("command", command);
   }
 
-  sendMove(dx: -1 | 0 | 1, dy: -1 | 0 | 1): void {
-    this.room?.send("move", { type: "move", seq: this.sequence++, dx, dy });
+  sendMove(dx: -1 | 0 | 1, dy: -1 | 0 | 1): number {
+    const seq = this.sequence++;
+    this.room?.send("move", { type: "move", seq, dx, dy });
+    return seq;
   }
 
   async disconnect(): Promise<void> {
     this.disposed = true;
     this.connectionGeneration += 1;
     const room = this.room;
-    if (room) sessionStorage.removeItem(this.reconnectKey(room.roomId.toUpperCase()));
+    const wasConnected = room?.connection?.isOpen === true;
+    if (room) clearReconnectToken(room.roomId);
     this.room = undefined;
     this.latestRoomSnapshot = undefined;
-    if (room) await room.leave();
+    if (room && wasConnected) await room.leave();
+    else if (room) {
+      room.reconnection.enabled = false;
+      void room.leave(false);
+    }
   }
-
-  private reconnectKey(roomCode: string): string { return `osmosis:reconnect:${roomCode}`; }
 
   private setStatus(status: NetworkStatus): void {
     this.status = status;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ARENA_OBSTACLES, MOVEMENT_CONFIG, settleBattle, remainingSeconds, generatePickupLocations } from "..";
+import { ARENA_CONFIG, MOVEMENT_COLLIDERS, MOVEMENT_CONFIG, settleBattle, remainingSeconds, generatePickupLocations } from "..";
 
 describe("authoritative gameplay rules", () => {
   it("makes ties transfer no points", () => {
@@ -46,8 +46,9 @@ describe("authoritative gameplay rules", () => {
     expect(generatePickupLocations(123456)).toEqual(first);
     expect(generatePickupLocations(654321)).not.toEqual(first);
     expect(first).toHaveLength(12);
-    expect(first.every(({ x }) => x > 350 && x < 2_450)).toBe(true);
-    expect(first.every((point) => ARENA_OBSTACLES.every((wall) => {
+    expect(first.every(({ x, y }) => x > MOVEMENT_CONFIG.playerRadius && x < ARENA_CONFIG.width - MOVEMENT_CONFIG.playerRadius &&
+      y > MOVEMENT_CONFIG.playerRadius && y < ARENA_CONFIG.height - MOVEMENT_CONFIG.playerRadius)).toBe(true);
+    expect(first.every((point) => MOVEMENT_COLLIDERS.every((wall) => {
       const nearestX = Math.max(wall.x, Math.min(point.x, wall.x + wall.width));
       const nearestY = Math.max(wall.y, Math.min(point.y, wall.y + wall.height));
       return (point.x - nearestX) ** 2 + (point.y - nearestY) ** 2 >= MOVEMENT_CONFIG.playerRadius ** 2;

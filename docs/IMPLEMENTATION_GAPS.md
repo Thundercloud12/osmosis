@@ -1,0 +1,54 @@
+# Implementation status and remaining gaps
+
+**Updated:** 2026-10-27
+
+Implementation order and verification are tracked in [IMPLEMENTATION_BACKLOG.md](IMPLEMENTATION_BACKLOG.md). This records current source state separately from runtime evidence.
+
+## Gameplay work implemented
+
+| Area | Current implementation | Remaining evidence |
+|---|---|---|
+| Movement | Shared fixed-step movement/collision is used by server and local predictor. Inputs are numbered; snapshots acknowledge simulated inputs; unacknowledged inputs replay from authority; small render corrections decay independently. | Chromium 1v1 movement trace recorded inputs, snapshots, frames and a 195 px authoritative displacement. Use `?movementDebug=1` and inspect `window.__osmosisMovementTrace` for future local/tunneled comparisons. |
+| Remote movement | Remote snapshots are buffered and interpolated. Buffer resets on lifecycle changes and visibility loss. | Browser match rendering was visually reviewed. A repeated network-jitter/camera measurement is still useful but did not block this implementation. |
+| Pickups | Server awards each distinct pickup once to an ACTIVE player within its authoritative radius. Focused and room integration tests cover consecutive stars, inactive players and contested pickup ordering. | No latency-injected browser contention run was performed. |
+| Score privacy | PLAYING snapshots send own-team balances and aggregate only; spotted enemy temporary inactivity is serialized as ACTIVE. RESULTS includes both team totals and every player's final balance. | Projector and room integration tests verify live redaction, complete final roster, and team totals equal the sum of final player balances. |
+| Mobile inactivity and contact freeze | INACTIVE players keep movement and cannot collect, link, raid or enter ordinary battles. ACTIVE-INACTIVE contact freezes only the ACTIVE player for 3 seconds without changing points/status; the timer is private, and continuous contact cannot retrigger it. | Focused tests, room-level payload assertions and a headful Chromium 5v5 run passed. The browser player moved while INACTIVE; a bot's freeze stopped movement and ended on schedule. |
+| HQ combat | HQ has no blanket immunity. Ordinary active contacts use normal battle comparison/transfer and inactivity; raids retain their existing channel, reward, interruption and cooldown. | Focused system and room integration tests passed. |
+| HQ pole | Each team has one active holder. Shared/server collision rules block teammates from an occupied zone. Any non-eliminated enemy touching the holder, including an INACTIVE player, is permanently eliminated without point transfer; the holder stays active. | Focused and room integration tests passed. Dedicated browser choreography for simultaneous holder contacts was not run. |
+| Elimination/spectating | `ELIMINATED` is permanent for the round, has zero points, retains team voice authorization, cannot move or issue match actions, and follows the next roster-ordered living teammate using that teammate's filtered view. A battle that drains an individual to zero also eliminates them. Full team elimination ends the match. | Room tests cover battle-depletion and pole elimination, zeroed balances, spectator projection, voice authorization and action rejection. Prior headful Chromium 5v5 verified spectator follow; the new point-zero animation still needs browser review. |
+| Allocation | Server enforces a 500-point starting minimum per player while preserving the 10,000-point team total and 100-point increments. The lobby prevents captain edits from dropping a player below the minimum. | Room integration rejects a balanced allocation containing a 400-point player; default 1v1/2v2/5v5 allocations remain above minimum. |
+| Voice control | Private Team rooms remain isolated. Global has its own opt-in receive path and selected transmit target; Global opt-out preserves Team audio, while DEAFEN mutes all incoming voice. | Headful 2v2 checks verified non-silent synthetic Team audio only reaches a teammate, Global audio reaches Red and Blue only after each opts in, Global opt-out unsubscribes while Team remains connected, and DEAFEN mutes Team and Global together. Physical microphone capture, device permissions and voice quality remain open. |
+| Gameplay feedback | Scoped `battleResolved`, `poleElimination` and raider-only raid events drive short Phaser tweens and Kenney particle effects. Effects are presentation-only and render below fog. | Room integration verifies event recipients; headful 5v5 screenshots visually confirm tag, pole and raid feedback. Reduced-motion review remains open. |
+| Modular boundaries | Shared movement, server movement/battle/pickup/link/raid/status/projection, client prediction/interpolation/tracing, and map/fog/crewmate renderers have explicit modules. The room owns canonical state and tick ordering; the Phaser scene composes presentation and input. | Lobby/session methods and some scene link/camera feedback remain adapters; final regression review checks for duplicate rules and lifecycle leaks. |
+| Temporary test modes | 1v1/2v2 selectors appear in development. The server rejects these modes in production unless `ENABLE_TEST_ROOM_MODES=true`. | Dev selection and match startup passed in Chromium; production gating is covered by policy tests. |
+| Reconnect and presence | Unexpected drops freeze the player and reserve the same seat for 120 seconds. Reconnect restores the player ID, score and prior status; host transfer is deterministic. Explicit leave clears the browser token, and disconnected records are removed before a rematch unless their reservation is still live. | Room integration and headful Chromium full-process-restart checks verify the 120-second reservation, same identity and score, host handoff, no duplicate seat, and explicit leave. Public-tunnel reconnection remains open. |
+
+## Source-audit items deferred from core gameplay repair
+
+These are PRD launch scope, not reported defects being repaired in this pass:
+
+- Team pings are accepted but currently ignored; implement short-lived team-only ping markers.
+- Short tutorial/context help for tagging, linking, inactivity recovery, raids and pole rules.
+- Voice speaking indicators, physical microphone permission-denial behavior, and real-device voice quality.
+- Audio/visual polish, accessibility contrast, reduced-motion/volume controls and keyboard remapping.
+- Network-quality feedback, ten-player load/fairness tests, privacy notice and abuse reporting before public matchmaking.
+- Manual spectator target selection; spectators currently follow one deterministic teammate.
+
+## Verification completed
+
+- `pnpm typecheck` passed; the complete `pnpm test` suite passed with 60 tests across shared, web and server packages.
+- The room integration suite covers allocation minimum, battle-depletion elimination, pole point removal, complete result totals/roster, recipient-scoped tag/raid feedback, consecutive pickups, HQ battles, spectator projection, score/inactivity privacy, LiveKit token scopes and eliminated-player team voice authorization. A new live-room transport test verifies 120-second seat reservation, host transfer and same-player reconnect with points retained.
+- `pnpm --filter @osmosis/server playtest:reconnect` passed in headful Chromium. It shut down and restarted Chromium with the same temporary profile, restored the same 1v1 player/score, preserved the transferred host, and verified explicit leave cleared the token without leaving a reservation. Screenshot: `/tmp/osmosis-headful-reconnect.png`.
+- Final Chromium run created and started 1v1, 2v2 and standard 5v5 (10-player) matches. Each rendered Phaser canvases and hid enemy score. The 1v1 run joined both clients to their team voice rooms; Chromium movement trace evidence was also captured in a 1v1 run.
+- Headful Chromium playtest joined nine SDK bots and one browser player to standard 5v5, verified bot movement through the authoritative server, confirmed an INACTIVE browser player could move, confirmed an ACTIVE bot froze for 3 seconds on contact and moved again after expiry, triggered pole elimination through the room contact resolver, and confirmed the browser spectated a moving teammate while the match stayed active. It also verified the muted V toggle cycle, voice dock placement, and that the results screen showed the authoritative totals and all player balances. The run command and its deterministic fixture are documented in [PLAYTEST_AUTOMATION.md](PLAYTEST_AUTOMATION.md).
+- A separate three-browser voice run delivered synthetic Team audio from a Blue client only to its teammate (RMS 0.145), then delivered Global audio to opted-in Red and Blue listeners (RMS 0.145). It verified Global opt-out preserves the Team session and full DEAFEN silences both channels. See [VOICE_AUDIO_AUTOMATION.md](VOICE_AUDIO_AUTOMATION.md). This verifies LiveKit delivery and channel isolation, not physical microphone capture.
+- The earlier headless browser run emitted Phaser `InvalidStateError` suspend/resume messages for closed `AudioContext`s while tabs were closed; this did not stop matches or voice-room joins.
+
+## Remaining verification gaps
+
+- Visually review zero-balance feedback and reduced-motion behavior in a browser; tag, pole and raid effects were reviewed in the headful 5v5 run.
+- Run a browser scenario with natural movement to choreograph pickup contention, ordinary HQ collision and pole contact; the current bot scenario deterministically positions the pole collision so that it can be replayed.
+- Extend bot movement from the current short deterministic route to longer seeded play patterns and collect movement/collision/pickup telemetry over a full match duration.
+- Exercise reconnect/rematch through the public Cloudflare tunnel with repeatable traces. Local full-browser shutdown/restart and room-token acceptance are now verified.
+- Verify physical microphone capture, permission denial and real-device voice quality; synthetic same-team delivery and cross-team isolation now pass in the automated three-browser run.
+- Run load/fairness checks for a full 10-player match under network impairment.

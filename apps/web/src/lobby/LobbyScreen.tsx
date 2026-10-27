@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 
-import type { LobbyCommand, LobbySnapshot, RoomSnapshot } from "@osmosis/shared";
+import { GAME_RULES, type LobbyCommand, type LobbySnapshot, type RoomMode, type RoomSnapshot } from "@osmosis/shared";
 import type { NetworkStatus } from "../net/MultiplayerClient";
 
 interface LobbyScreenProps {
@@ -8,7 +8,7 @@ interface LobbyScreenProps {
   networkStatus: NetworkStatus;
   error: string | undefined;
   latestRoomSnapshot: RoomSnapshot | null;
-  onCreate: (nickname: string) => void;
+  onCreate: (nickname: string, roomMode: RoomMode) => void;
   onJoin: (nickname: string, code: string) => void;
   onCommand: (command: LobbyCommand) => void;
   onLeave: () => void;
@@ -23,6 +23,8 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onC
   const [nickname, setNickname] = useState("");
   const [roomCode, setRoomCode] = useState(new URLSearchParams(window.location.search).get("room")?.toUpperCase() ?? "");
   const [copied, setCopied] = useState(false);
+  const [roomMode, setRoomMode] = useState<RoomMode>("STANDARD");
+  const testRoomModesEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_ROOM_MODES === "true";
   const self = lobby?.players.find((player) => player.id === lobby.selfPlayerId);
   const ownTeamPlayers = useMemo(
     () => lobby?.players.filter((player) => player.teamId === self?.teamId) ?? [],
@@ -35,7 +37,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onC
 
   function submitCreate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    onCreate(nickname.trim() || "Crew");
+    onCreate(nickname.trim() || "Crew", roomMode);
   }
 
   function submitJoin(event: React.FormEvent<HTMLFormElement>) {
@@ -46,8 +48,11 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onC
   function changePoints(playerId: string, delta: number) {
     if (!lobby) return;
     const values = Object.fromEntries(lobby.ownTeamAllocation.map((entry) => [entry.playerId, entry.points ?? 0]));
-    const donor = ownTeamPlayers.find((player) => player.id !== playerId && (values[player.id] ?? 0) >= delta);
-    if (delta > 0 && !donor) return;
+    const donor = ownTeamPlayers.find((player) => player.id !== playerId && (delta > 0
+      ? (values[player.id] ?? 0) >= GAME_RULES.minimumStartingPointsPerPlayer + delta
+      : true));
+    if (!donor) return;
+    if (delta < 0 && (values[playerId] ?? 0) + delta < GAME_RULES.minimumStartingPointsPerPlayer) return;
     values[playerId] = (values[playerId] ?? 0) + delta;
     if (donor) values[donor.id] = (values[donor.id] ?? 0) - delta;
     onCommand({ type: "allocate", pointsByPlayerId: values });
@@ -85,7 +90,15 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onC
             <div className="card-tab">YOUR CREW STARTS HERE</div>
             <label className="field-label" htmlFor="nickname">CREWMATE NAME</label>
             <input id="nickname" className="lobby-input" value={nickname} maxLength={24} placeholder="e.g. Starbean" onChange={(event) => setNickname(event.target.value)} />
-            <button className="play-button" disabled={networkStatus.state === "connecting"} onClick={() => onCreate(nickname.trim() || "Crew")}>
+            <label className="field-label" htmlFor="room-mode">ROOM SIZE</label>
+            <select id="room-mode" className="lobby-input" value={roomMode} onChange={(event) => setRoomMode(event.target.value as RoomMode)}>
+              <option value="STANDARD">Standard match · 5v5</option>
+              {testRoomModesEnabled && <>
+                <option value="TEST_1V1">Test match · 1v1</option>
+                <option value="TEST_2V2">Test match · 2v2</option>
+              </>}
+            </select>
+            <button className="play-button" disabled={networkStatus.state === "connecting"} onClick={() => onCreate(nickname.trim() || "Crew", roomMode)}>
               {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE A ROOM"}<span>→</span>
             </button>
             <div className="or-divider"><span /> OR JOIN YOUR FRIENDS <span /></div>
@@ -103,15 +116,15 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onC
             <div><p className="mini-label">PRE-MATCH AIRLOCK</p><h1>Gather your <span>crew.</span></h1></div>
             <button className="quiet-button" onClick={onLeave}>LEAVE ROOM</button>
           </div>
-          <div className="invite-strip"><span>Send your friends the room code</span><strong>{lobby.roomCode}</strong><button className="copy-button" onClick={() => void copyInvite()}>{copied ? "COPIED! ✓" : "COPY INVITE ↗"}</button><span className="player-count">{lobby.connectedPlayerCount}/10 PLAYERS</span></div>
+          <div className="invite-strip"><span>{lobby.roomMode === "TEST_1V1" ? "Test match · one player on each crew" : lobby.roomMode === "TEST_2V2" ? "Test match · two players on each crew" : "Send your friends the room code"}</span><strong>{lobby.roomCode}</strong><button className="copy-button" onClick={() => void copyInvite()}>{copied ? "COPIED! ✓" : "COPY INVITE ↗"}</button><span className="player-count">{lobby.connectedPlayerCount}/{lobby.teamSize * 2} PLAYERS</span></div>
 
           <div className="lobby-grid">
             {teams.map((team) => {
               const roster = lobby.players.filter((player) => player.teamId === team.id);
               const captainId = lobby.captainIds[team.id];
               return <section className={`team-card team-card-${team.color}`} key={team.id}>
-                <header className="team-card-heading"><span className="team-emblem">✦</span><div><p>{team.id === "BLUE" ? "COOL AS COSMOS" : "A LITTLE BIT BOLD"}</p><h2>{team.label}</h2></div><strong>{roster.length}/5</strong></header>
-                <div className="roster-list">{Array.from({ length: 5 }, (_, index) => {
+                <header className="team-card-heading"><span className="team-emblem">✦</span><div><p>{team.id === "BLUE" ? "COOL AS COSMOS" : "A LITTLE BIT BOLD"}</p><h2>{team.label}</h2></div><strong>{roster.length}/{lobby.teamSize}</strong></header>
+                <div className="roster-list">{Array.from({ length: lobby.teamSize }, (_, index) => {
                   const player = roster[index];
                   return <div className={`roster-slot ${player ? "occupied" : "empty"}`} key={player?.id ?? `${team.id}-${index}`}>
                     <span className="crew-avatar">{player ? player.nickname.slice(0, 1).toUpperCase() : "+"}</span>
@@ -133,28 +146,31 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onC
             <div className="control-copy">
               <p className="mini-label">{lobby.phase === "ALLOCATION" ? "CAPTAIN'S TABLE" : lobby.phase === "COUNTDOWN" ? "AIRLOCK CLOSING" : "NEXT UP"}</p>
               <h2>{lobby.phase === "ALLOCATION" ? "Share the team points." : lobby.phase === "COUNTDOWN" ? "Launching soon!" : lobby.allocationComplete ? "Ready for liftoff?" : "Pick your captains."}</h2>
-              <p>{lobby.phase === "ALLOCATION" ? `Your crew's captain can split ${totalPoints.toLocaleString()} points. The other crew's plan stays private.` : lobby.phase === "COUNTDOWN" ? "The host can cancel if someone needs another moment." : lobby.allocationComplete ? `${lobby.players.filter((player) => player.ready).length}/10 crewmates ready to launch.` : "Fill both crews, then each side picks a captain to plan its opening points."}</p>
+              <p>{lobby.phase === "ALLOCATION" ? `Your crew's captain can split ${totalPoints.toLocaleString()} points, with at least 500 for each crewmate. The other crew's plan stays private.` : lobby.phase === "COUNTDOWN" ? "The host can cancel if someone needs another moment." : lobby.allocationComplete ? `${lobby.players.filter((player) => player.ready).length}/${lobby.teamSize * 2} crewmates ready to launch.` : `Fill both crews (${lobby.teamSize} each), then each side picks a captain to plan its opening points.`}</p>
               {error && <p className="lobby-error" role="alert">{error}</p>}
             </div>
             <div className="control-actions">
               {lobby.phase === "ALLOCATION" && <>
                 <div className="allocation-list">{ownTeamPlayers.map((player) => {
                   const points = pointsByPlayer.get(player.id) ?? 0;
-                  return <div className="allocation-row" key={player.id}><span>{player.nickname}{player.isCaptain ? " ✦" : ""}</span><button className="stepper" disabled={!isCaptain || lobby.ownTeamLocked || points < 100} onClick={() => changePoints(player.id, -100)} aria-label={`Remove 100 points from ${player.nickname}`}>−</button><strong>{points.toLocaleString()}</strong><button className="stepper" disabled={!isCaptain || lobby.ownTeamLocked} onClick={() => changePoints(player.id, 100)} aria-label={`Add 100 points to ${player.nickname}`}>+</button></div>;
+                  const step = GAME_RULES.allocationIncrement;
+                  const hasTeammate = ownTeamPlayers.some((candidate) => candidate.id !== player.id);
+                  const hasDonor = ownTeamPlayers.some((candidate) => candidate.id !== player.id && (pointsByPlayer.get(candidate.id) ?? 0) >= GAME_RULES.minimumStartingPointsPerPlayer + step);
+                  return <div className="allocation-row" key={player.id}><span>{player.nickname}{player.isCaptain ? " ✦" : ""}</span><button className="stepper" disabled={!isCaptain || lobby.ownTeamLocked || points <= GAME_RULES.minimumStartingPointsPerPlayer || !hasTeammate} onClick={() => changePoints(player.id, -step)} aria-label={`Remove ${step} points from ${player.nickname}`}>−</button><strong>{points.toLocaleString()}</strong><button className="stepper" disabled={!isCaptain || lobby.ownTeamLocked || !hasDonor} onClick={() => changePoints(player.id, step)} aria-label={`Add ${step} points to ${player.nickname}`}>+</button></div>;
                 })}</div>
                 {isCaptain && !lobby.ownTeamLocked && <button className="play-button compact-button" disabled={totalPoints !== 10_000} onClick={() => onCommand({ type: "lockAllocation" })}>LOCK MY CREW <span>✓</span></button>}
                 {lobby.ownTeamLocked && <div className="locked-note">YOUR CREW'S PLAN IS LOCKED ✓</div>}
               </>}
-              {lobby.phase === "LOBBY" && !lobby.allocationComplete && isHost && <button className="play-button compact-button" disabled={lobby.connectedPlayerCount !== 10 || lobby.captainIds.BLUE === null || lobby.captainIds.RED === null} onClick={() => onCommand({ type: "beginAllocation" })}>OPEN POINT ALLOCATION <span>→</span></button>}
+              {lobby.phase === "LOBBY" && !lobby.allocationComplete && isHost && <button className="play-button compact-button" disabled={lobby.connectedPlayerCount !== lobby.teamSize * 2 || lobby.captainIds.BLUE === null || lobby.captainIds.RED === null} onClick={() => onCommand({ type: "beginAllocation" })}>OPEN POINT ALLOCATION <span>→</span></button>}
               {lobby.phase === "LOBBY" && lobby.allocationComplete && <>
                 <button className={`ready-button ${self?.ready ? "ready-on" : ""}`} onClick={() => onCommand({ type: "ready", ready: !self?.ready })}>{self?.ready ? "I'M READY ✓" : "READY UP"}</button>
-                {isHost && <button className="play-button compact-button" disabled={lobby.connectedPlayerCount !== 10 || lobby.players.some((player) => !player.ready)} onClick={() => onCommand({ type: "startCountdown" })}>START MATCH <span>→</span></button>}
+                {isHost && <button className="play-button compact-button" disabled={lobby.connectedPlayerCount !== lobby.teamSize * 2 || lobby.players.some((player) => !player.ready)} onClick={() => onCommand({ type: "startCountdown" })}>START MATCH <span>→</span></button>}
               </>}
               {lobby.phase === "COUNTDOWN" && <><div className="countdown-number">{lobby.countdownSecondsRemaining ?? 0}</div>{isHost && <button className="quiet-button" onClick={() => onCommand({ type: "cancelCountdown" })}>CANCEL COUNTDOWN</button>}</>}
-              {lobby.phase === "LOBBY" && !lobby.allocationComplete && <div className="requirement-note">{lobby.connectedPlayerCount < 10 ? `Waiting for ${10 - lobby.connectedPlayerCount} more players` : "Both captains need to be selected"}</div>}
+              {lobby.phase === "LOBBY" && !lobby.allocationComplete && <div className="requirement-note">{lobby.connectedPlayerCount < lobby.teamSize * 2 ? `Waiting for ${lobby.teamSize * 2 - lobby.connectedPlayerCount} more players` : "Both captains need to be selected"}</div>}
             </div>
           </section>
-          <footer className="lobby-footer"><span className="online-dot" /> SERVER CONNECTED <span>·</span> {networkStatus.connectedPlayerCount}/10 PLAYERS</footer>
+          <footer className="lobby-footer"><span className="online-dot" /> SERVER CONNECTED <span>·</span> {networkStatus.connectedPlayerCount}/{lobby.teamSize * 2} PLAYERS</footer>
         </section>
       )}
     </main>

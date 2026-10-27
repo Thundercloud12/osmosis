@@ -59,9 +59,10 @@ export function settleBattle(
     };
   }
 
-  const winners = firstTotal > secondTotal ? firstGroup : secondGroup;
-  const losers = firstTotal > secondTotal ? secondGroup : firstGroup;
-  const transfer = Math.min(transferLimit, firstTotal > secondTotal ? secondTotal : firstTotal);
+  const firstGroupWon = firstTotal > secondTotal;
+  const winners = firstGroupWon ? firstGroup : secondGroup;
+  const losers = firstGroupWon ? secondGroup : firstGroup;
+  const transfer = Math.min(transferLimit, firstGroupWon ? secondTotal : firstTotal);
   return {
     winnerIds: winners.map((player) => player.id),
     loserIds: losers.map((player) => player.id),

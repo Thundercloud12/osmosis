@@ -8,6 +8,9 @@ export const matchPhaseSchema = z.enum([
   "RESULTS",
 ]);
 
+export const roomModeSchema = z.enum(["STANDARD", "TEST_1V1", "TEST_2V2"]);
+export type RoomMode = z.infer<typeof roomModeSchema>;
+
 const movementAxisSchema = z.union([z.literal(-1), z.literal(0), z.literal(1)]);
 
 export const clientCommandSchema = z.discriminatedUnion("type", [
@@ -50,32 +53,42 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
 export type MatchPhase = z.infer<typeof matchPhaseSchema>;
 
+export const playerStatusSchema = z.enum(["ACTIVE", "INACTIVE", "ELIMINATED", "DISCONNECTED"]);
+export type PlayerStatus = z.infer<typeof playerStatusSchema>;
+
 export interface PlayerSummary {
   id: string;
   nickname: string;
   teamId: "BLUE" | "RED";
-  status: "ACTIVE" | "INACTIVE" | "DISCONNECTED";
+  status: PlayerStatus;
 }
 
 export const playerSnapshotSchema = z.object({
   id: z.string().min(1).max(64),
   nickname: z.string().min(1).max(24),
   teamId: z.enum(["BLUE", "RED"]),
-  status: z.enum(["ACTIVE", "INACTIVE", "DISCONNECTED"]),
+  status: playerStatusSchema,
   x: z.number().finite(),
   y: z.number().finite(),
+  poleHolder: z.boolean().optional(),
+  acknowledgedInputSeq: z.number().int().min(-1).optional(),
+  inactiveSecondsRemaining: z.number().int().nonnegative().optional(),
+  frozenSecondsRemaining: z.number().int().nonnegative().optional(),
   points: z.number().int().nonnegative().optional(),
   linkedPlayerId: z.string().min(1).max(64).optional(),
 });
 
 export const roomSnapshotSchema = z.object({
   phase: z.enum(["PLAYING", "RESULTS"]),
+  teamSize: z.number().int().min(1).max(5),
   selfPlayerId: z.string().min(1).max(64),
-  connectedPlayerCount: z.number().int().min(1).max(10),
+  hostPlayerId: z.string().min(1).max(64).optional(),
+  connectedPlayerCount: z.number().int().min(0).max(10),
   serverTime: z.number().finite(),
   remainingSeconds: z.number().int().min(0).max(900),
   players: z.array(playerSnapshotSchema).max(10),
-  teamScores: z.object({ BLUE: z.number().int().nonnegative(), RED: z.number().int().nonnegative() }),
+  spectatorTargetId: z.string().min(1).max(64).optional(),
+  teamScores: z.object({ BLUE: z.number().int().nonnegative().nullable(), RED: z.number().int().nonnegative().nullable() }),
   pickups: z.array(z.object({ id: z.string().min(1), x: z.number().finite(), y: z.number().finite() })).max(32),
   selfRaid: z.object({ progressSeconds: z.number().finite().nonnegative(), cooldownSecondsRemaining: z.number().int().nonnegative() }).nullable(),
   result: z.object({
@@ -93,6 +106,40 @@ export const roomSnapshotSchema = z.object({
   }).nullable(),
 });
 
+const gameEventIdSchema = z.string().min(1).max(48);
+const eventPlayerSchema = z.object({
+  playerId: z.string().min(1).max(64),
+  teamId: z.enum(["BLUE", "RED"]),
+  x: z.number().finite(),
+  y: z.number().finite(),
+});
+
+export const gameEventSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("battleResolved"),
+    eventId: gameEventIdSchema,
+    participants: z.array(eventPlayerSchema.extend({
+      outcome: z.enum(["WIN", "LOSS", "TIE", "ELIMINATED"]),
+    })).min(2).max(4),
+  }),
+  z.object({
+    type: z.literal("poleElimination"),
+    eventId: gameEventIdSchema,
+    attacker: eventPlayerSchema,
+    holder: eventPlayerSchema,
+  }),
+  z.object({
+    type: z.literal("raidFeedback"),
+    eventId: gameEventIdSchema,
+    stage: z.enum(["STARTED", "INTERRUPTED", "COMPLETED"]),
+    raiderPlayerId: z.string().min(1).max(64),
+    teamId: z.enum(["BLUE", "RED"]),
+    baseTeamId: z.enum(["BLUE", "RED"]),
+  }),
+]);
+
+export type GameEvent = z.infer<typeof gameEventSchema>;
+
 export type PlayerSnapshot = z.infer<typeof playerSnapshotSchema>;
 export type RoomSnapshot = z.infer<typeof roomSnapshotSchema>;
 
@@ -104,17 +151,19 @@ export const lobbyPlayerSchema = z.object({
   connected: z.boolean(),
   isHost: z.boolean(),
   isCaptain: z.boolean(),
-  startingPoints: z.number().int().nonnegative().optional(),
+  startingPoints: z.number().int().min(500).optional(),
 });
 
 export const lobbySnapshotSchema = z.object({
   roomCode: z.string().length(6).regex(/^[A-Z2-9]+$/),
+  roomMode: roomModeSchema,
+  teamSize: z.number().int().min(1).max(5),
   phase: matchPhaseSchema,
   selfPlayerId: z.string().min(1).max(64),
   voiceCredential: z.string().min(20).max(2_048),
   voiceRoomName: z.string().min(1).max(128),
   hostPlayerId: z.string().min(1).max(64),
-  connectedPlayerCount: z.number().int().min(1).max(10),
+  connectedPlayerCount: z.number().int().min(0).max(10),
   players: z.array(lobbyPlayerSchema).max(10),
   captainIds: z.object({
     BLUE: z.string().min(1).max(64).nullable(),
@@ -122,7 +171,7 @@ export const lobbySnapshotSchema = z.object({
   }),
   ownTeamAllocation: z.array(z.object({
     playerId: z.string().min(1).max(64),
-    points: z.number().int().nonnegative().nullable(),
+    points: z.number().int().min(500).nullable(),
   })).max(5),
   ownTeamLocked: z.boolean(),
   allocationComplete: z.boolean(),
