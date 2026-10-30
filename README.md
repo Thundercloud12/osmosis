@@ -30,6 +30,18 @@ pnpm build
 
 `pnpm dev` starts the web client and Colyseus server. Open the Vite URL shown in the terminal, enter a crewmate name, and create a room. In development, choose **Test match · 1v1** or **Test match · 2v2** for a smaller session, or leave **Standard match · 5v5** selected. Production servers reject test modes unless `ENABLE_TEST_ROOM_MODES=true` is explicitly set. Share the six-character code or copy the invite link so friends can join. The host can open point allocation once the room is full and each team has a captain. Each captain assigns exactly 10,000 points to their crew in 100-point steps; teammates can see their crew's allocation, while the other crew's points stay hidden. After both captains lock their plans, all players ready up and the host starts the five-second countdown. During a match, use WASD to move, hold F near a teammate to link, and hold E inside the enemy base to raid. Tag opponents by contact; re-arm after 15 seconds or return to your own base to recover early. The first active player to hold their HQ pole is protected there; an active opponent who touches them is permanently eliminated. Teammates cannot enter an occupied pole zone. Collect glowing stars to earn points. Opponent numeric scores stay hidden. The host can start a rematch from the results screen. The game server health endpoint is available at `http://localhost:2567/health`.
 
+## Docker
+
+The root Compose file starts the Node/Colyseus server and the built web client as separate containers:
+
+```sh
+docker compose up --build
+```
+
+Open `http://localhost:5173`. The game server is on port `2567`; set `VITE_GAME_SERVER_URL` at build time when the browser must reach it at a different address. Copy `.env.example` to `.env` and set a persistent `RECONNECT_SECRET` and `METRICS_TOKEN` for containerized runs. The web image uses Vite's preview server for local/containerized play; use a static hosting service for a public production deployment.
+
+For the single-instance EC2 deployment using a static web host and a named Cloudflare Tunnel, follow [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md). It uses a separate production Compose file and leaves the local `compose.yaml` flow unchanged.
+
 To capture movement diagnostics while testing, append `?movementDebug=1` to the match URL. The browser stores up to 10,000 input, snapshot and frame records in `window.__osmosisMovementTrace` for inspection or comparison between local and tunneled sessions.
 
 To connect from another device on the same network, set `VITE_GAME_SERVER_URL` to the server's reachable HTTP address and add the web origin to `CLIENT_ORIGINS` before starting the processes.

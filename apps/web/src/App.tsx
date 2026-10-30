@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { LobbyScreen } from "./lobby/LobbyScreen";
+import { MatchmakingScreen } from "./lobby/MatchmakingScreen";
 import { ArenaCanvas } from "./game/ArenaCanvas";
 import { ResultsScreen } from "./lobby/ResultsScreen";
 import { MultiplayerClient, type NetworkStatus } from "./net/MultiplayerClient";
-import type { LobbyCommand, LobbySnapshot, RoomMode, RoomSnapshot } from "@osmosis/shared";
+import type { LobbyCommand, LobbySnapshot, MatchmakingCommand, MatchmakingSnapshot, MatchSettings, QuickPlaySettings, RoomMode, RoomSnapshot } from "@osmosis/shared";
 import { VoiceControls } from "./voice/VoiceControls";
 
 export function App() {
@@ -16,10 +17,15 @@ export function App() {
   });
   const [error, setError] = useState<string>();
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [matchmakingSnapshot, setMatchmakingSnapshot] = useState<MatchmakingSnapshot | null>(null);
+  const [matchmakingActive, setMatchmakingActive] = useState(false);
+  const [reportNotice, setReportNotice] = useState<string>();
   const autoJoinStarted = useRef(false);
   const errorTimer = useRef<number | undefined>(undefined);
 
   const receiveLobbySnapshot = useCallback((snapshot: LobbySnapshot) => {
+    setMatchmakingActive(false);
+    setMatchmakingSnapshot(null);
     setLobby(snapshot);
     if (snapshot.phase !== "PLAYING" && snapshot.phase !== "RESULTS") setRoomSnapshot(null);
     const currentUrl = new URL(window.location.href);
@@ -42,24 +48,48 @@ export function App() {
     errorTimer.current = window.setTimeout(() => setError(undefined), 3_500);
   }, []);
   const receiveRoomSnapshot = useCallback((snapshot: RoomSnapshot) => setRoomSnapshot(snapshot), []);
+  const receiveMatchmakingSnapshot = useCallback((snapshot: MatchmakingSnapshot) => {
+    setMatchmakingSnapshot(snapshot);
+    setMatchmakingActive(true);
+  }, []);
+  const receiveMatchmakingClosed = useCallback(() => {
+    setMatchmakingActive(false);
+    setMatchmakingSnapshot(null);
+  }, []);
+  const receiveReportAccepted = useCallback((message: string) => {
+    setReportNotice(message);
+    window.setTimeout(() => setReportNotice(undefined), 3_500);
+  }, []);
 
   useEffect(() => {
     const unsubscribeLobby = network.onLobbySnapshot(receiveLobbySnapshot);
     const unsubscribeStatus = network.onStatus(receiveNetworkStatus);
     const unsubscribeError = network.onCommandError(receiveCommandError);
     const unsubscribeRoom = network.onSnapshot(receiveRoomSnapshot);
+    const unsubscribeMatchmaking = network.onMatchmakingSnapshot(receiveMatchmakingSnapshot);
+    const unsubscribeMatchmakingClosed = network.onMatchmakingClosed(receiveMatchmakingClosed);
+    const unsubscribeReport = network.onReportAccepted(receiveReportAccepted);
     return () => {
       unsubscribeLobby();
       unsubscribeStatus();
       unsubscribeError();
       unsubscribeRoom();
+      unsubscribeMatchmaking();
+      unsubscribeMatchmakingClosed();
+      unsubscribeReport();
       if (errorTimer.current !== undefined) window.clearTimeout(errorTimer.current);
     };
-  }, [network, receiveCommandError, receiveLobbySnapshot, receiveNetworkStatus, receiveRoomSnapshot]);
+  }, [network, receiveCommandError, receiveLobbySnapshot, receiveNetworkStatus, receiveRoomSnapshot, receiveMatchmakingSnapshot, receiveMatchmakingClosed, receiveReportAccepted]);
 
   useEffect(() => {
     const roomCode = new URLSearchParams(window.location.search).get("room");
-    if (!roomCode || autoJoinStarted.current) return;
+    if (autoJoinStarted.current) return;
+
+    if (!roomCode) {
+      autoJoinStarted.current = true;
+      void network.resumeMatchmaking().then((resumed) => { if (resumed) setMatchmakingActive(true); });
+      return;
+    }
 
     const timer = window.setTimeout(() => {
       autoJoinStarted.current = true;
@@ -70,12 +100,42 @@ export function App() {
     return () => window.clearTimeout(timer);
   }, [network]);
 
-  const createRoom = useCallback(async (nickname: string, roomMode: RoomMode) => {
+  const createRoom = useCallback(async (nickname: string, roomMode: RoomMode, matchSettings: MatchSettings) => {
     setError(undefined);
     try {
-      await network.createRoom(nickname, roomMode);
+      await network.createRoom(nickname, roomMode, matchSettings);
     } catch (createError) {
       setError(createError instanceof Error ? createError.message : "Could not create a room.");
+    }
+  }, [network]);
+
+  const startSoloQuickPlay = useCallback(async (nickname: string, settings: QuickPlaySettings) => {
+    setError(undefined);
+    setMatchmakingActive(true);
+    try { await network.queueSolo(nickname, settings); }
+    catch (queueError) {
+      setMatchmakingActive(false);
+      setError(queueError instanceof Error ? queueError.message : "Could not join Quick Play.");
+    }
+  }, [network]);
+
+  const createParty = useCallback(async (nickname: string, settings: QuickPlaySettings) => {
+    setError(undefined);
+    setMatchmakingActive(true);
+    try { await network.createParty(nickname, settings); }
+    catch (partyError) {
+      setMatchmakingActive(false);
+      setError(partyError instanceof Error ? partyError.message : "Could not create a crew party.");
+    }
+  }, [network]);
+
+  const joinParty = useCallback(async (nickname: string, code: string) => {
+    setError(undefined);
+    setMatchmakingActive(true);
+    try { await network.joinParty(nickname, code); }
+    catch (partyError) {
+      setMatchmakingActive(false);
+      setError(partyError instanceof Error ? partyError.message : "Could not join that crew party.");
     }
   }, [network]);
 
@@ -97,18 +157,24 @@ export function App() {
     await network.disconnect();
     setLobby(null);
     setRoomSnapshot(null);
+    setMatchmakingActive(false);
+    setMatchmakingSnapshot(null);
     setNetworkStatus({ state: "disconnected", connectedPlayerCount: 0 });
     window.history.replaceState(null, "", window.location.pathname);
   }, [network]);
 
   let screen;
-  if (roomSnapshot?.phase === "RESULTS" && roomSnapshot.result) {
+  if (matchmakingActive && !lobby && !roomSnapshot) {
+    screen = <MatchmakingScreen snapshot={matchmakingSnapshot} error={error}
+      onCommand={(command: MatchmakingCommand) => { setError(undefined); network.sendMatchmakingCommand(command); }}
+      onLeave={() => { void network.leaveMatchmaking(); setMatchmakingActive(false); setMatchmakingSnapshot(null); window.history.replaceState(null, "", window.location.pathname); }} />;
+  } else if (roomSnapshot?.phase === "RESULTS" && roomSnapshot.result) {
     const fallbackHost = lobby?.players.find((player) => player.id === lobby.selfPlayerId)?.isHost ?? false;
     const isHost = roomSnapshot.hostPlayerId ? roomSnapshot.hostPlayerId === roomSnapshot.selfPlayerId : fallbackHost;
     screen = <ResultsScreen result={roomSnapshot.result} isHost={isHost} error={error}
       onRematch={() => network.sendCommand({ type: "rematch" })} onLeave={leaveRoom} />;
   } else if (lobby?.phase === "PLAYING" || roomSnapshot?.phase === "PLAYING") {
-    screen = <ArenaCanvas network={network} snapshot={roomSnapshot} error={error} onLeave={() => void leaveRoom()} onNetworkStatus={receiveNetworkStatus} />;
+    screen = <ArenaCanvas network={network} snapshot={roomSnapshot} error={error} reportNotice={reportNotice} onLeave={() => void leaveRoom()} onNetworkStatus={receiveNetworkStatus} networkStatus={networkStatus} />;
   } else screen = (
     <LobbyScreen
       lobby={lobby}
@@ -117,6 +183,9 @@ export function App() {
       latestRoomSnapshot={roomSnapshot}
       onCreate={createRoom}
       onJoin={joinRoom}
+      onQuickPlay={startSoloQuickPlay}
+      onCreateParty={createParty}
+      onJoinParty={joinParty}
       onCommand={sendCommand}
       onLeave={leaveRoom}
     />

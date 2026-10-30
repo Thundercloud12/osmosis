@@ -1,8 +1,13 @@
-import { defineRoom, defineServer, matchMaker } from "colyseus";
+import { timingSafeEqual } from "node:crypto";
+
+import { defineRoom, defineServer, matchMaker } from "@colyseus/core";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { AccessToken } from "livekit-server-sdk";
+import { GAME_RULES } from "@osmosis/shared";
 
 import { activeArenaRooms, ArenaRoom, type VoiceChannel } from "./rooms/ArenaRoom";
+import { runtimeMetrics } from "./observability/RuntimeMetrics";
+import { activeMatchmakingRoom, MatchmakingRoom } from "./matchmaking/MatchmakingRoom";
 
 const allowedOrigins = new Set(
   (process.env.CLIENT_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173")
@@ -27,6 +32,7 @@ matchMaker.controller.getCorsHeaders = (headers) => {
 export const server = defineServer({
   rooms: {
     arena: defineRoom(ArenaRoom),
+    matchmaking: defineRoom(MatchmakingRoom),
   },
   express: (app) => {
     app.use(express.json({ limit: "4kb" }));
@@ -47,7 +53,29 @@ export const server = defineServer({
       next();
     });
     app.get("/health", (_request: Request, response: Response) => {
-      response.json({ status: "ok", voiceConfigured: Boolean(process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) });
+      response.json({ status: "ok", quickPlayEnabled: process.env.NODE_ENV !== "production" || process.env.ENABLE_QUICK_PLAY === "true", voiceConfigured: Boolean(process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) });
+    });
+    app.get("/internal/metrics", (request: Request, response: Response) => {
+      const token = process.env.METRICS_TOKEN;
+      if (!token) { response.sendStatus(404); return; }
+
+      const authorization = request.get("authorization") ?? "";
+      const suppliedToken = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+      const expected = Buffer.from(token);
+      const supplied = Buffer.from(suppliedToken);
+      if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+        response.setHeader("WWW-Authenticate", "Bearer");
+        response.sendStatus(401);
+        return;
+      }
+
+      response.setHeader("Cache-Control", "no-store");
+      const rooms = [...activeArenaRooms.values()];
+      const connectedPlayers = rooms.reduce((total, room) => total + room.clients.length, 0);
+      response.json({
+        ...runtimeMetrics.snapshot(rooms.length, connectedPlayers, GAME_RULES.simulationHz),
+        matchmaking: activeMatchmakingRoom?.metricsSnapshot() ?? { parties: 0, queueTickets: 0, queuedPlayers: 0, handoffPlayers: 0, handoffs: 0 },
+      });
     });
     app.post("/voice/token", async (request: Request, response: Response) => {
       const body = request.body as { roomCode?: unknown; credential?: unknown; channel?: unknown } | undefined;

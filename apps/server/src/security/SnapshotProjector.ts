@@ -3,6 +3,7 @@ import {
   MOVEMENT_CONFIG,
   hasLineOfSight,
   remainingSeconds,
+  type MatchSettings,
   type PlayerSnapshot,
   type RoomSnapshot,
   type TeamId,
@@ -12,7 +13,7 @@ import type { PoleHolders } from "../systems/MovementSystem";
 
 export interface SnapshotProjectionInput {
   phase: "PLAYING" | "RESULTS";
-  teamSize: number;
+  matchSettings: MatchSettings;
   hostPlayerId?: string;
   self: ServerPlayer;
   players: readonly ServerPlayer[];
@@ -21,6 +22,7 @@ export interface SnapshotProjectionInput {
   now: number;
   remainingSeconds: number;
   pickups: readonly Pickup[];
+  helpPings: readonly { playerId: string; teamId: TeamId; expiresAt: number }[];
   raidStartedAt: number | undefined;
   raidCooldownUntil: number;
   poleHolders: PoleHolders;
@@ -39,6 +41,7 @@ export function projectSnapshot(input: SnapshotProjectionInput): RoomSnapshot {
   const winnerTeam = input.winnerOverride ?? naturalWinner;
   const result = input.phase === "RESULTS" ? {
     winnerTeam,
+    matchSettings: input.matchSettings,
     teamScores: { BLUE: blueScore, RED: redScore },
     players: players.map((player) => ({
         id: player.id,
@@ -93,15 +96,21 @@ export function projectSnapshot(input: SnapshotProjectionInput): RoomSnapshot {
       cooldownSecondsRemaining: remainingSeconds(input.raidCooldownUntil, input.now),
     };
 
+  const helpPings = input.phase === "RESULTS" ? [] : input.helpPings
+    .filter((ping) => ping.teamId === self.teamId && ping.expiresAt > input.now)
+    .filter((ping) => players.some((player) => player.id === ping.playerId && player.connected && player.status !== "ELIMINATED" && player.status !== "DISCONNECTED"))
+    .map((ping) => ({ playerId: ping.playerId, remainingMs: Math.max(1, Math.ceil(ping.expiresAt - input.now)) }));
+
   return {
     phase: input.phase,
-    teamSize: input.teamSize,
+    matchSettings: input.matchSettings,
     selfPlayerId: self.id,
     ...(input.hostPlayerId ? { hostPlayerId: input.hostPlayerId } : {}),
     connectedPlayerCount: input.connectedPlayerCount,
     serverTime: input.serverTime,
     remainingSeconds: input.remainingSeconds,
     players: playerSnapshots,
+    helpPings,
     ...(spectatorTarget ? { spectatorTargetId: spectatorTarget.id } : {}),
     teamScores,
     pickups: [...input.pickups],

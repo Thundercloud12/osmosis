@@ -20,6 +20,7 @@ import { FogOfWarRenderer } from "../render/FogOfWarRenderer";
 import { CrewmateRenderer } from "../render/CrewmateRenderer";
 import { MovementTrace } from "../net/MovementTrace";
 import { FeedbackRenderer } from "../render/FeedbackRenderer";
+import { HelpPingRenderer, type HelpPingMarkerDebugState } from "../render/HelpPingRenderer";
 
 interface RemotePlayer {
   root: Phaser.GameObjects.Container;
@@ -39,9 +40,16 @@ interface SpectatorDebugProbe {
   cameraCenter: { x: number; y: number };
 }
 
+interface HelpPingDebugProbe {
+  snapshotPlayerIds: string[];
+  markers: HelpPingMarkerDebugState[];
+  serverTime: number | undefined;
+}
+
 declare global {
   interface Window {
     __osmosisSpectatorDebug?: () => SpectatorDebugProbe;
+    __osmosisHelpPingDebug?: () => HelpPingDebugProbe;
   }
 }
 
@@ -52,6 +60,7 @@ export class ArenaScene extends Phaser.Scene {
   private readonly fogRenderer = new FogOfWarRenderer(this);
   private readonly crewmateRenderer = new CrewmateRenderer(this);
   private readonly movementTrace = new MovementTrace();
+  private readonly helpPingRenderer = new HelpPingRenderer(this);
   private feedbackRenderer!: FeedbackRenderer;
   private playerArt!: Phaser.GameObjects.Container;
   private playerAvatar!: Phaser.GameObjects.Image;
@@ -114,6 +123,7 @@ export class ArenaScene extends Phaser.Scene {
     this.onShutdownOrDestroy(() => {
       unsubscribeEvents();
       this.feedbackRenderer.destroy();
+      this.helpPingRenderer.destroy();
       this.seenGameEventIds.clear();
       this.gameEventOrder.length = 0;
     });
@@ -131,6 +141,9 @@ export class ArenaScene extends Phaser.Scene {
       if (!event.repeat) this.network.sendCommand({ type: "interact", targetId: "enemy-base", active: true });
     };
     const stopRaid = () => this.network.sendCommand({ type: "interact", targetId: "enemy-base", active: false });
+    const sendHelpPing = (event: KeyboardEvent) => {
+      if (!event.repeat) this.network.sendCommand({ type: "ping" });
+    };
     const stopLink = () => {
       this.linkHoldStartedAt = undefined;
       this.didShowNoTeammateToast = false;
@@ -142,10 +155,12 @@ export class ArenaScene extends Phaser.Scene {
     keyboard.on("keydown-E", startRaid);
     keyboard.on("keyup-E", stopRaid);
     keyboard.on("keyup-F", stopLink);
+    keyboard.on("keydown-G", sendHelpPing);
     this.onShutdownOrDestroy(() => {
       keyboard.off("keydown-E", startRaid);
       keyboard.off("keyup-E", stopRaid);
       keyboard.off("keyup-F", stopLink);
+      keyboard.off("keydown-G", sendHelpPing);
       keyboard.removeKey(this.linkKey);
       this.scale.off(Phaser.Scale.Events.RESIZE, this.positionLinkToast, this);
     });
@@ -173,6 +188,18 @@ export class ArenaScene extends Phaser.Scene {
       window.__osmosisSpectatorDebug = probe;
       this.onShutdownOrDestroy(() => {
         if (window.__osmosisSpectatorDebug === probe) delete window.__osmosisSpectatorDebug;
+      });
+    }
+
+    if (import.meta.env.DEV && new URLSearchParams(window.location.search).get("helpPingDebug") === "1") {
+      const probe = (): HelpPingDebugProbe => ({
+        snapshotPlayerIds: this.currentSnapshot?.helpPings.map((ping) => ping.playerId) ?? [],
+        markers: this.helpPingRenderer.debugState(),
+        serverTime: this.currentSnapshot?.serverTime,
+      });
+      window.__osmosisHelpPingDebug = probe;
+      this.onShutdownOrDestroy(() => {
+        if (window.__osmosisHelpPingDebug === probe) delete window.__osmosisHelpPingDebug;
       });
     }
   }
@@ -203,7 +230,7 @@ export class ArenaScene extends Phaser.Scene {
       this.linkHoldStartedAt ??= time;
       if (!self?.linkedPlayerId && !this.pendingLinkTargetId && !this.didShowNoTeammateToast &&
         time - this.linkHoldStartedAt >= 2_000) {
-        const message = this.currentSnapshot?.teamSize === 1
+        const message = this.currentSnapshot?.matchSettings.teamSize === 1
           ? "No teammate available in this 1v1 match"
           : "No available teammate in sight";
         this.showLinkToast(message, "warning");
@@ -230,6 +257,15 @@ export class ArenaScene extends Phaser.Scene {
       pickup.setScale(1 + Math.sin(time / 250 + index) * 0.08);
     }
     this.drawLinks();
+
+    if (this.currentSnapshot) {
+      const positions = new Map<string, { x: number; y: number }>();
+      if (self) positions.set(self.id, { x: this.player.x, y: this.player.y });
+      for (const [playerId, remote] of this.remotePlayers) {
+        positions.set(playerId, { x: remote.root.x, y: remote.root.y });
+      }
+      this.helpPingRenderer.update(this.currentSnapshot, positions, time);
+    }
 
     this.playerLabel.setPosition(this.player.x, this.player.y - 45);
 

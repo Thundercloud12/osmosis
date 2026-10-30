@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { Client, type Room } from "@colyseus/sdk";
 import {
   ARENA_OBSTACLES,
@@ -12,9 +12,9 @@ import {
   type GameEvent,
 } from "@osmosis/shared";
 
-import { matchMaker } from "colyseus";
+import { matchMaker } from "@colyseus/core";
 import { server } from "../app.config";
-import { ArenaRoom } from "./ArenaRoom";
+import { ArenaRoom, roomJoinLimiter } from "./ArenaRoom";
 
 interface MutablePlayer {
   id: string;
@@ -109,6 +109,19 @@ function nextCommandError(client: SnapshotClient): Promise<string> {
   });
 }
 
+function nextReportAccepted(client: SnapshotClient): Promise<{ targetPlayerId: string; message: string }> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { unsubscribe(); reject(new Error("Timed out waiting for report acceptance")); }, 3_000);
+    const unsubscribe = client.onMessage<unknown>("reportAccepted", (payload) => {
+      if (typeof payload !== "object" || payload === null || !("targetPlayerId" in payload)
+        || typeof payload.targetPlayerId !== "string" || !("message" in payload) || typeof payload.message !== "string") return;
+      clearTimeout(timeout);
+      unsubscribe();
+      resolve({ targetPlayerId: payload.targetPlayerId, message: payload.message });
+    });
+  });
+}
+
 function nextGameEvent(client: SnapshotClient, predicate: (event: GameEvent) => boolean = () => true): Promise<GameEvent> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => { unsubscribe(); reject(new Error("Timed out waiting for a game feedback event")); }, 3_000);
@@ -142,6 +155,8 @@ describe("M3 lobby and multiplayer arena", () => {
   beforeAll(async () => {
     await server.listen(2568);
   });
+
+  beforeEach(() => roomJoinLimiter.clear());
 
   afterAll(async () => {
     await server.gracefullyShutdown(false);
@@ -310,6 +325,17 @@ describe("M3 lobby and multiplayer arena", () => {
     expect(moverSnapshot.players.every((player) => player.teamId !== "BLUE" || player.points !== undefined)).toBe(true);
     expect(moverSnapshot.teamScores.RED).toBeNull();
     expect(moverSnapshot.players.filter((player) => player.teamId === "RED").every((player) => player.points === undefined)).toBe(true);
+
+    const redServerTimeBeforePing = initialSnapshots[redIndex]!.serverTime;
+    const teammatePingSnapshotPromise = nextSnapshot(teammate as unknown as SnapshotClient,
+      (snapshot) => snapshot.helpPings.some((ping) => ping.playerId === moverId));
+    const enemyPingSnapshotPromise = nextSnapshot(redClient as unknown as SnapshotClient,
+      (snapshot) => snapshot.serverTime > redServerTimeBeforePing && snapshot.helpPings.length === 0);
+    mover.send("command", { type: "ping" });
+    const [teammatePingSnapshot, enemyPingSnapshot] = await Promise.all([teammatePingSnapshotPromise, enemyPingSnapshotPromise]);
+    expect(teammatePingSnapshot.helpPings.find((ping) => ping.playerId === moverId)?.remainingMs).toBeGreaterThan(0);
+    expect(teammatePingSnapshot.helpPings.find((ping) => ping.playerId === moverId)?.remainingMs).toBeLessThanOrEqual(4_000);
+    expect(enemyPingSnapshot.helpPings).toEqual([]);
 
     for (let sequence = 0; sequence < 45; sequence += 1) {
       mover.send("move", { type: "move", seq: sequence, dx: 1, dy: 0 });
@@ -572,6 +598,7 @@ describe("M3 lobby and multiplayer arena", () => {
     expect(resultSnapshot.phase).toBe("RESULTS");
     expect(resultSnapshot.result).not.toBeNull();
     expect(resultSnapshot.result?.players).toHaveLength(10);
+    expect(resultSnapshot.result?.matchSettings).toEqual({ teamSize: 5, matchDurationSeconds: 900 });
     expect(resultSnapshot.result?.teamScores.BLUE).toBeTypeOf("number");
     expect(resultSnapshot.result?.teamScores.RED).toBeTypeOf("number");
     expect(resultSnapshot.result?.players.find((player) => player.id === redPlayer.id)?.points).toBe(0);
@@ -593,6 +620,74 @@ describe("M3 lobby and multiplayer arena", () => {
     await Promise.all(clients.map((client) => client.leave()));
   }, 30_000);
 
+  it("creates an official 4v4 room with server-owned team size and custom match duration", async () => {
+    const clients: Room[] = [];
+    try {
+      await expect(gameClient.create("arena", {
+        nickname: "Invalid Format",
+        matchSettings: { teamSize: 3, matchDurationSeconds: 900 },
+      })).rejects.toThrow();
+      await expect(gameClient.create("arena", {
+        nickname: "Invalid Timer",
+        matchSettings: { teamSize: 4, matchDurationSeconds: 301 },
+      })).rejects.toThrow();
+
+      const first = await gameClient.create("arena", {
+        nickname: "4v4 Host",
+        matchSettings: { teamSize: 4, matchDurationSeconds: 600 },
+      });
+      clients.push(first);
+      const room = matchMaker.getLocalRoomById(first.roomId) as ArenaRoom;
+      const internals = room as unknown as {
+        playersPerTeam: number;
+        players: Map<string, { id: string }>;
+        matchSettings: { teamSize: number; matchDurationSeconds: number };
+        matchDeadline: number | undefined;
+        startMatch(): void;
+        finishMatch(): void;
+        rematch(player: { id: string }): void;
+      };
+      for (let index = 1; index < 8; index += 1) {
+        clients.push(await gameClient.joinById(room.roomId, { nickname: `4v4 Player ${index + 1}` }));
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      const snapshots = await Promise.all(clients.map((client) => nextLobbySnapshot(client as unknown as SnapshotClient)));
+      expect(snapshots.every((snapshot) => snapshot.matchSettings.teamSize === 4 && snapshot.matchSettings.matchDurationSeconds === 600)).toBe(true);
+      expect(internals.playersPerTeam).toBe(4);
+      expect(internals.matchSettings).toEqual({ teamSize: 4, matchDurationSeconds: 600 });
+      expect(room.clients).toHaveLength(8);
+      await expect(gameClient.joinById(room.roomId, { nickname: "Extra Player" })).rejects.toThrow();
+
+      const teamCounts = snapshots.reduce((counts, snapshot) => {
+        const self = snapshot.players.find((player) => player.id === snapshot.selfPlayerId)!;
+        counts[self.teamId] += 1;
+        return counts;
+      }, { BLUE: 0, RED: 0 });
+      expect(teamCounts).toEqual({ BLUE: 4, RED: 4 });
+
+      const playing = nextSnapshot(clients[0] as unknown as SnapshotClient, (snapshot) => snapshot.phase === "PLAYING");
+      internals.startMatch();
+      const playingSnapshot = await playing;
+      expect(playingSnapshot.matchSettings).toEqual({ teamSize: 4, matchDurationSeconds: 600 });
+      expect(playingSnapshot.remainingSeconds).toBeLessThanOrEqual(600);
+      expect(playingSnapshot.remainingSeconds).toBeGreaterThan(590);
+      expect(playingSnapshot.result).toBeNull();
+      expect(internals.matchDeadline).toBeDefined();
+
+      const resultPromise = nextSnapshot(clients[0] as unknown as SnapshotClient, (snapshot) => snapshot.phase === "RESULTS");
+      internals.finishMatch();
+      const resultSnapshot = await resultPromise;
+      expect(resultSnapshot.result?.matchSettings).toEqual({ teamSize: 4, matchDurationSeconds: 600 });
+      const hostState = internals.players.get(first.sessionId)!;
+      const rematchPromise = lobbyUntil(clients[0] as unknown as SnapshotClient, (snapshot) => snapshot.phase === "LOBBY");
+      internals.rematch(hostState);
+      expect((await rematchPromise).matchSettings).toEqual({ teamSize: 4, matchDurationSeconds: 600 });
+    } finally {
+      await Promise.all(clients.map((client) => client.leave()));
+    }
+  }, 30_000);
+
   it("creates a temporary 2v2 room and launches it with the same lobby rules", async () => {
     const clients: Room[] = [];
     try {
@@ -608,7 +703,7 @@ describe("M3 lobby and multiplayer arena", () => {
 
       await new Promise((resolve) => setTimeout(resolve, 60));
       const snapshots = await Promise.all(clients.map((client) => nextLobbySnapshot(client as unknown as SnapshotClient)));
-      expect(snapshots.every((snapshot) => snapshot.roomMode === "TEST_2V2" && snapshot.teamSize === 2)).toBe(true);
+      expect(snapshots.every((snapshot) => snapshot.roomMode === "TEST_2V2" && snapshot.matchSettings.teamSize === 2)).toBe(true);
       expect(room.clients).toHaveLength(4);
       await expect(gameClient.joinById(room.roomId, { nickname: "Extra Tester" })).rejects.toThrow();
       expect(room.clients).toHaveLength(4);
@@ -647,7 +742,7 @@ describe("M3 lobby and multiplayer arena", () => {
       await everyoneReady;
       const countdown = lobbyUntil(host as unknown as SnapshotClient, (snapshot) => snapshot.phase === "COUNTDOWN");
       host.send("command", { type: "startCountdown" });
-      expect((await countdown).teamSize).toBe(2);
+      expect((await countdown).matchSettings.teamSize).toBe(2);
 
       const blueClient = clients[0]!;
       const initialMatch = await nextSnapshot(blueClient as unknown as SnapshotClient);
@@ -663,4 +758,53 @@ describe("M3 lobby and multiplayer arena", () => {
       await Promise.all(clients.map((client) => client.leave()));
     }
   }, 20_000);
+
+  it("rejects invalid and duplicate abuse reports and limits each player to three reports per match", async () => {
+    const clients: Room[] = [];
+    const reportLog = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    try {
+      const first = await gameClient.create("arena", { nickname: "Reporting Crew" });
+      clients.push(first);
+      const room = matchMaker.getLocalRoomById(first.roomId) as ArenaRoom;
+      for (let index = 1; index < 5; index += 1) {
+        clients.push(await gameClient.joinById(room.roomId, { nickname: `Reported Crew ${index}` }));
+      }
+      const internals = room as unknown as { players: Map<string, MutablePlayer>; phase: string };
+      internals.phase = "PLAYING";
+      const reporter = internals.players.get(first.sessionId)!;
+      const targets = clients.slice(1).map((client) => internals.players.get(client.sessionId)!.id);
+      const reporterClient = first as unknown as SnapshotClient;
+
+      const selfError = nextCommandError(reporterClient);
+      first.send("command", { type: "reportPlayer", targetPlayerId: reporter.id, category: "OTHER" });
+      expect(await selfError).toContain("report yourself");
+
+      const unknownError = nextCommandError(reporterClient);
+      first.send("command", { type: "reportPlayer", targetPlayerId: "missing-player", category: "CHEATING" });
+      expect(await unknownError).toContain("no longer in this match");
+
+      const acceptedFirst = nextReportAccepted(reporterClient);
+      first.send("command", { type: "reportPlayer", targetPlayerId: targets[0], category: "HARASSMENT" });
+      expect(await acceptedFirst).toMatchObject({ targetPlayerId: targets[0] });
+      const structuredReport = JSON.parse(String(reportLog.mock.calls[0]?.[0])) as { event: string; category: string };
+      expect(structuredReport).toMatchObject({ event: "osmosis.abuse_report", category: "HARASSMENT" });
+
+      const duplicateError = nextCommandError(reporterClient);
+      first.send("command", { type: "reportPlayer", targetPlayerId: targets[0], category: "OTHER" });
+      expect(await duplicateError).toContain("already reported");
+
+      for (const targetId of targets.slice(1, 3)) {
+        const accepted = nextReportAccepted(reporterClient);
+        first.send("command", { type: "reportPlayer", targetPlayerId: targetId, category: "OTHER" });
+        await expect(accepted).resolves.toMatchObject({ targetPlayerId: targetId });
+      }
+
+      const limitError = nextCommandError(reporterClient);
+      first.send("command", { type: "reportPlayer", targetPlayerId: targets[3], category: "CHEATING" });
+      expect(await limitError).toContain("maximum number of reports");
+    } finally {
+      reportLog.mockRestore();
+      await Promise.all(clients.map((client) => client.leave()));
+    }
+  }, 15_000);
 });

@@ -1,0 +1,66 @@
+name: osmosis-production
+
+services:
+  game-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: server
+    image: osmosis/game-server:production
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      NODE_ENV: production
+      PORT: "2567"
+      CLIENT_ORIGINS: ${CLIENT_ORIGINS:?Set CLIENT_ORIGINS in deploy/production.env}
+      LIVEKIT_URL: ${LIVEKIT_URL:-}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:-}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:-}
+      RECONNECT_SECRET: ${RECONNECT_SECRET:?Set RECONNECT_SECRET in deploy/production.env}
+      METRICS_TOKEN: ${METRICS_TOKEN:?Set METRICS_TOKEN in deploy/production.env}
+      ENABLE_QUICK_PLAY: ${ENABLE_QUICK_PLAY:-false}
+      ENABLE_TEST_ROOM_MODES: "false"
+    expose:
+      - "2567"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:2567/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.10.5
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token
+      - ${CLOUDFLARE_TUNNEL_TOKEN:?Set CLOUDFLARE_TUNNEL_TOKEN in deploy/production.env}
+    restart: unless-stopped
+    depends_on:
+      game-server:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - backend
+
+networks:
+  backend:
+    driver: bridge

@@ -13,8 +13,8 @@ function player(id: string, teamId: "BLUE" | "RED", options: Partial<ServerPlaye
 }
 
 const baseInput = {
-  phase: "PLAYING" as const, teamSize: 5, connectedPlayerCount: 10, hostPlayerId: "blue", serverTime: 1_000, now: 1_000,
-  remainingSeconds: 800, pickups: [], raidStartedAt: undefined, raidCooldownUntil: 0,
+  phase: "PLAYING" as const, matchSettings: { teamSize: 5 as const, matchDurationSeconds: 900 }, connectedPlayerCount: 10, hostPlayerId: "blue", serverTime: 1_000, now: 1_000,
+  remainingSeconds: 800, pickups: [], helpPings: [], raidStartedAt: undefined, raidCooldownUntil: 0,
   poleHolders: { BLUE: undefined, RED: undefined }, winnerOverride: null,
 };
 
@@ -56,5 +56,22 @@ describe("recipient-specific snapshots", () => {
     expect(snapshot.result?.players.map(({ id }) => id).sort()).toEqual(["blue-alive", "blue-dead", "red"]);
     expect(snapshot.result?.players.find(({ id }) => id === "blue-dead")?.points).toBe(0);
     expect(snapshot.players.find(({ id }) => id === "red")).not.toHaveProperty("points");
+  });
+
+  it("projects live Help pings only to the requester's team and drops expired or unavailable pingers", () => {
+    const self = player("blue", "BLUE");
+    const teammate = player("ally", "BLUE");
+    const enemy = player("red", "RED");
+    const helpPings = [
+      { playerId: "ally", teamId: "BLUE" as const, expiresAt: 3_000 },
+      { playerId: "red", teamId: "RED" as const, expiresAt: 4_000 },
+      { playerId: "gone", teamId: "BLUE" as const, expiresAt: 4_000 },
+      { playerId: "blue", teamId: "BLUE" as const, expiresAt: 900 },
+    ];
+    const blueView = projectSnapshot({ ...baseInput, self, players: [self, teammate, enemy], helpPings });
+    const redView = projectSnapshot({ ...baseInput, self: enemy, players: [self, teammate, enemy], helpPings });
+
+    expect(blueView.helpPings).toEqual([{ playerId: "ally", remainingMs: 2_000 }]);
+    expect(redView.helpPings).toEqual([{ playerId: "red", remainingMs: 3_000 }]);
   });
 });

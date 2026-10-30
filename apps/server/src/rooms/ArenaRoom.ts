@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 
-import { Room, ServerError, matchMaker, type Client } from "colyseus";
+import { Room, ServerError, matchMaker, type Client } from "@colyseus/core";
 import {
   GAME_RULES,
   MOVEMENT_CONFIG,
@@ -11,10 +11,12 @@ import {
   generatePickupLocations,
   gameEventSchema,
   lobbySnapshotSchema,
+  matchSettingsSchema,
   remainingSeconds,
+  roomCreationOptionsSchema,
   roomSnapshotSchema,
-  roomModeSchema,
   type LobbyPlayer,
+  type MatchSettings,
   type PlayerStatus,
   type GameEvent,
   type TeamId,
@@ -27,15 +29,32 @@ import { breakLink as breakLinkSystem, startLink as startLinkSystem, validateLin
 import { advanceRaids as advanceRaidsSystem, cancelRaid, setRaid, type ActiveRaid } from "../systems/RaidSystem";
 import { eliminatePlayer as eliminatePlayerSystem, eliminatedTeamWinner, freezeMovement as freezeMovementSystem, makeInactive as makeInactiveSystem, rearmPlayers as rearmPlayersSystem, reconcilePoleHolders as reconcilePoleHoldersSystem } from "../systems/PlayerStatusSystem";
 import { projectSnapshot } from "../security/SnapshotProjector";
+import { runtimeMetrics } from "../observability/RuntimeMetrics";
 import { connectedPlayerCount as countConnectedPlayers, disconnectPlayer, oldestConnectedPlayerId, purgeDisconnectedPlayersForRematch, reconnectPlayer } from "../systems/PresenceSystem";
 import { roomModeAllowed } from "./RoomModePolicy";
 import type { Pickup, ServerPlayer } from "./Player";
+import { verifyHandoffCredential, verifyQuickPlayRoomCredential, type QuickPlayHandoffClaims } from "../matchmaking/HandoffCredential";
+import { WindowRateLimiter } from "../security/WindowRateLimiter";
 
 const PLAYER_RADIUS = MOVEMENT_CONFIG.playerRadius;
 const ROOM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 type RoomPhase = "LOBBY" | "ALLOCATION" | "COUNTDOWN" | "PLAYING" | "RESULTS";
-const VOICE_CREDENTIAL_SECRET = process.env.RECONNECT_SECRET ?? randomBytes(32).toString("base64url");
+const VOICE_CREDENTIAL_SECRET = process.env.RECONNECT_SECRET || randomBytes(32).toString("base64url");
 const VOICE_CREDENTIAL_TTL_SECONDS = 16 * 60;
+export const roomJoinLimiter = new WindowRateLimiter();
+const abuseReportLimiter = new WindowRateLimiter();
+
+function requireNickname(options: unknown): string {
+  const requestedName = typeof options === "object" && options !== null && "nickname" in options
+    ? options.nickname
+    : undefined;
+  if (typeof requestedName !== "string") throw new ServerError(400, "Enter a crewmate name to join.");
+  const nickname = requestedName.trim();
+  if (!/^[\p{L}\p{N}_ -]{1,24}$/u.test(nickname)) {
+    throw new ServerError(400, "Use 1–24 letters, numbers, spaces, underscores or hyphens for your name.");
+  }
+  return nickname;
+}
 
 export interface VoiceIdentity {
   playerId: string;
@@ -48,8 +67,23 @@ export type VoiceChannel = "TEAM" | "GLOBAL";
 
 export const activeArenaRooms = new Map<string, ArenaRoom>();
 
+interface QuickPlayRoomSeat {
+  sessionId: string;
+  playerId: string;
+  nickname: string;
+  teamId: TeamId;
+}
+
+interface QuickPlayRoomConfig {
+  matchmakingRoomId: string;
+  handoffId: string;
+  seats: QuickPlayRoomSeat[];
+}
+
 export class ArenaRoom extends Room {
   private roomMode: RoomMode = "STANDARD";
+  private matchSettings!: MatchSettings;
+  private quickPlayConfig: QuickPlayRoomConfig | undefined;
   private playersPerTeam: number = GAME_RULES.teamSize;
   private readonly players = new Map<string, ServerPlayer>();
   private phase: RoomPhase = "LOBBY";
@@ -61,6 +95,9 @@ export class ArenaRoom extends Room {
   private countdownDeadline: number | undefined;
   private matchDeadline: number | undefined;
   private readonly activeContactPairs = new Set<string>();
+  private readonly helpPingExpiresAt = new Map<string, number>();
+  private readonly helpPingCooldownUntil = new Map<string, number>();
+  private readonly reportedTargets = new Map<string, Set<string>>();
   private readonly poleHolders: PoleHolders = { BLUE: undefined, RED: undefined };
   private readonly activeRaids: Record<TeamId, ActiveRaid | undefined> = { BLUE: undefined, RED: undefined };
   private readonly raidCooldownUntil: Record<TeamId, number> = { BLUE: 0, RED: 0 };
@@ -69,30 +106,69 @@ export class ArenaRoom extends Room {
   private gameEventSequence = 0;
   private resultWinnerOverride: TeamId | null = null;
   private readonly captainReassignTimers: Record<TeamId, ReturnType<typeof setTimeout> | undefined> = { BLUE: undefined, RED: undefined };
+  private lastSimulationStepAt: number | undefined;
 
   override async onCreate(options: unknown): Promise<void> {
-    const requestedMode = typeof options === "object" && options !== null && "roomMode" in options
-      ? options.roomMode
-      : undefined;
-    const parsedRoomMode = roomModeSchema.safeParse(requestedMode);
-    this.roomMode = parsedRoomMode.success ? parsedRoomMode.data : "STANDARD";
+    this.quickPlayConfig = parseQuickPlayRoomConfig(options);
+    const parsedOptions = roomCreationOptionsSchema.safeParse(options ?? {});
+    if (!parsedOptions.success) throw new ServerError(400, "Match settings are invalid.");
+    this.roomMode = parsedOptions.data.roomMode ?? "STANDARD";
     if (!roomModeAllowed(this.roomMode)) throw new ServerError(400, "Test room modes are disabled on this server.");
-    this.playersPerTeam = this.roomMode === "TEST_1V1" ? 1
-      : this.roomMode === "TEST_2V2" ? 2
-        : GAME_RULES.teamSize;
+    const testTeamSize = this.roomMode === "TEST_1V1" ? 1 : this.roomMode === "TEST_2V2" ? 2 : undefined;
+    const parsedMatchSettings = matchSettingsSchema.safeParse({
+      teamSize: parsedOptions.data.matchSettings?.teamSize ?? testTeamSize ?? GAME_RULES.teamSize,
+      matchDurationSeconds: parsedOptions.data.matchSettings?.matchDurationSeconds ?? GAME_RULES.matchDurationSeconds,
+    });
+    if (!parsedMatchSettings.success) throw new ServerError(400, "Match settings are invalid.");
+    if (testTeamSize !== undefined && parsedMatchSettings.data.teamSize !== testTeamSize) {
+      throw new ServerError(400, "The selected test room mode has a fixed team size.");
+    }
+    if (testTeamSize === undefined && parsedMatchSettings.data.teamSize !== 4 && parsedMatchSettings.data.teamSize !== 5) {
+      throw new ServerError(400, "Choose an official 4v4 or 5v5 room size.");
+    }
+    this.matchSettings = parsedMatchSettings.data;
+    this.playersPerTeam = this.matchSettings.teamSize;
+    if (this.quickPlayConfig) {
+      const seats = this.quickPlayConfig.seats;
+      const blueCount = seats.filter((seat) => seat.teamId === "BLUE").length;
+      const redCount = seats.filter((seat) => seat.teamId === "RED").length;
+      if (seats.length !== this.playersPerTeam * 2 || blueCount !== this.playersPerTeam || redCount !== this.playersPerTeam) {
+        throw new ServerError(400, "Quick Play created an invalid team assignment.");
+      }
+      this.seatReservationTimeout = 120;
+    }
     this.roomId = await this.generateRoomCode();
     activeArenaRooms.set(this.roomId, this);
     this.maxClients = this.playersPerTeam * 2;
     this.maxMessagesPerSecond = 30;
     await this.setPrivate();
-    this.setFixedTimestep((context) => this.step(context.dt), GAME_RULES.simulationHz);
+    this.setFixedTimestep((context) => {
+      const startedAt = performance.now();
+      const intervalMs = this.lastSimulationStepAt === undefined ? undefined : startedAt - this.lastSimulationStepAt;
+      this.lastSimulationStepAt = startedAt;
+      try {
+        this.step(context.dt);
+      } finally {
+        runtimeMetrics.recordSimulationStep(performance.now() - startedAt, intervalMs, 1_000 / GAME_RULES.simulationHz);
+      }
+    }, GAME_RULES.simulationHz);
     this.onMessage("move", (client, payload: unknown) => this.receiveMove(client, payload));
     this.onMessage("command", (client, payload: unknown) => this.receiveCommand(client, payload));
   }
 
-  override onAuth(_client: Client, _options: unknown): boolean {
+  override onAuth(client: Client, options: unknown, context: { ip: string | undefined }): boolean | QuickPlayHandoffClaims {
+    requireNickname(options);
+    if (!roomJoinLimiter.allow(context.ip ?? "unknown", 20, 60_000)) {
+      throw new ServerError(429, "Too many room joins from this network. Try again shortly.");
+    }
     if (this.phase !== "LOBBY") throw new ServerError(400, "This room is no longer accepting players.");
     if (this.players.size >= this.maxClients) throw new ServerError(400, "This room is full.");
+    if (this.quickPlayConfig) {
+      const claims = this.quickPlayClaims(client.sessionId, options);
+      if (!claims) throw new ServerError(403, "This Quick Play seat is invalid or expired.");
+      return claims;
+    }
+    if (hasQuickPlayCredential(options)) throw new ServerError(403, "This match handoff is invalid.");
     return true;
   }
 
@@ -100,6 +176,7 @@ export class ArenaRoom extends Room {
     const player = this.players.get(client.sessionId);
     if (!player) return;
     disconnectPlayer(player, performance.now() + GAME_RULES.reconnectGraceSeconds * 1_000);
+    this.helpPingExpiresAt.delete(player.id);
     this.breakLink(player);
     this.cancelRaidFor(player.id);
     releasePole(player, this.poleHolders);
@@ -165,17 +242,16 @@ export class ArenaRoom extends Room {
   }
 
   override onJoin(client: Client, options: unknown): void {
-    const optionsRecord = typeof options === "object" && options !== null ? options : {};
-    const requestedName = "nickname" in optionsRecord ? optionsRecord.nickname : undefined;
-    const nickname = typeof requestedName === "string" && /^[\p{L}\p{N}_ -]{1,24}$/u.test(requestedName.trim())
-      ? requestedName.trim()
-      : `Crew ${String(this.players.size + 1).padStart(2, "0")}`;
+    const nickname = requireNickname(options);
+    const claims = this.quickPlayConfig ? this.quickPlayClaims(client.sessionId, options) : undefined;
+    if (this.quickPlayConfig && !claims) throw new ServerError(403, "This Quick Play seat is invalid or expired.");
     const blueCount = this.countTeam("BLUE");
     const redCount = this.countTeam("RED");
-    const teamId: TeamId = blueCount <= redCount ? "BLUE" : "RED";
+    const teamId: TeamId = claims?.teamId ?? (blueCount <= redCount ? "BLUE" : "RED");
+    const teamCount = this.countTeam(teamId);
     const player: ServerPlayer = {
-      id: crypto.randomUUID(), nickname, teamId,
-      x: TEAM_SPAWNS[teamId].x, y: TEAM_SPAWNS[teamId].y + Math.min(blueCount, redCount) * TEAM_SPAWN_SPACING,
+      id: claims?.playerId ?? crypto.randomUUID(), nickname, teamId,
+      x: TEAM_SPAWNS[teamId].x, y: TEAM_SPAWNS[teamId].y + teamCount * TEAM_SPAWN_SPACING,
       dx: 0, dy: 0, lastSequence: -1, ready: false, joinOrder: this.joinOrder++,
       startingPoints: undefined, points: 0, status: "ACTIVE", inactiveUntil: 0, frozenUntil: 0,
       lastAppliedSequence: -1, pendingMoves: [], linkedPlayerId: undefined,
@@ -186,11 +262,38 @@ export class ArenaRoom extends Room {
     this.players.set(client.sessionId, player);
     this.hostPlayerId ??= player.id;
     this.sendLobbySnapshots();
+    if (claims) {
+      const matchmakingRoom = matchMaker.getLocalRoomById(claims.queueRoomId) as {
+        markArenaPlayerJoined?: (handoffId: string, playerId: string) => void;
+      } | undefined;
+      matchmakingRoom?.markArenaPlayerJoined?.(claims.handoffId, claims.playerId);
+    }
+  }
+
+  cancelQuickPlayHandoff(message: string): void {
+    if (!this.quickPlayConfig) return;
+    for (const client of [...this.clients]) {
+      client.send("quickPlayCancelled", { message });
+      client.leave();
+    }
+  }
+
+  private quickPlayClaims(sessionId: string, options: unknown): QuickPlayHandoffClaims | undefined {
+    if (!this.quickPlayConfig || typeof options !== "object" || options === null || !("quickPlayHandoff" in options)) return undefined;
+    const claims = verifyHandoffCredential(options.quickPlayHandoff);
+    if (!claims || claims.sessionId !== sessionId || claims.roomId !== this.roomId
+      || claims.queueRoomId !== this.quickPlayConfig.matchmakingRoomId
+      || claims.handoffId !== this.quickPlayConfig.handoffId) return undefined;
+    const seat = this.quickPlayConfig.seats.find((candidate) => candidate.sessionId === sessionId);
+    if (!seat || seat.playerId !== claims.playerId || seat.nickname !== claims.nickname || seat.teamId !== claims.teamId) return undefined;
+    try { return requireNickname(options) === claims.nickname ? claims : undefined; }
+    catch { return undefined; }
   }
 
   override onLeave(client: Client): void {
     const player = this.players.get(client.sessionId);
     if (!player) return;
+    this.helpPingExpiresAt.delete(player.id);
     disconnectPlayer(player, undefined);
     this.breakLink(player);
     this.cancelRaidFor(player.id);
@@ -247,6 +350,11 @@ export class ArenaRoom extends Room {
       client.send("commandError", { message: "That action could not be understood." });
       return;
     }
+    if (parsed.data.type === "reportPlayer") {
+      try { this.reportPlayer(client, player, parsed.data.targetPlayerId, parsed.data.category); }
+      catch (error) { client.send("commandError", { message: error instanceof Error ? error.message : "The report could not be submitted." }); }
+      return;
+    }
     try {
       if (this.phase === "PLAYING") {
         if (player.status === "ELIMINATED") throw new Error("Eliminated players are spectators for the rest of this round.");
@@ -254,7 +362,7 @@ export class ArenaRoom extends Room {
           case "interact": this.setInteraction(player, parsed.data.active !== false); break;
           case "linkStart": this.startLink(player, parsed.data.teammateId); break;
           case "linkStop": this.breakLink(player); break;
-          case "ping": break;
+          case "ping": this.requestHelpPing(player); break;
           default: throw new Error("That action is not available during the match.");
         }
         this.sendSnapshots();
@@ -283,8 +391,32 @@ export class ArenaRoom extends Room {
     this.sendLobbySnapshots();
   }
 
+  private reportPlayer(client: Client, reporter: ServerPlayer, targetPlayerId: string, category: "CHEATING" | "HARASSMENT" | "OTHER"): void {
+    if (this.phase !== "PLAYING" && this.phase !== "RESULTS") throw new Error("Player reports are available after a match begins.");
+    if (targetPlayerId === reporter.id) throw new Error("You can’t report yourself.");
+    const target = this.findById(targetPlayerId);
+    if (!target) throw new Error("That player is no longer in this match.");
+    const reportKey = `${this.roomId}:${this.roundNumber}:${reporter.id}`;
+    const targets = this.reportedTargets.get(reportKey) ?? new Set<string>();
+    if (targets.has(targetPlayerId)) throw new Error("You’ve already reported this player for this match.");
+    if (!abuseReportLimiter.allow(reportKey, 3, 15 * 60_000)) throw new Error("You’ve sent the maximum number of reports for this match.");
+    targets.add(targetPlayerId);
+    this.reportedTargets.set(reportKey, targets);
+    console.info(JSON.stringify({
+      event: "osmosis.abuse_report",
+      reportedAt: new Date().toISOString(),
+      roomCode: this.roomId,
+      round: this.roundNumber,
+      reporter: { id: reporter.id, nickname: reporter.nickname },
+      target: { id: target.id, nickname: target.nickname },
+      category,
+    }));
+    client.send("reportAccepted", { targetPlayerId, message: "Report received. Thanks for helping keep crews welcoming." });
+  }
+
   private chooseTeam(player: ServerPlayer, teamId: TeamId): void {
     if (this.phase !== "LOBBY" || this.allocationComplete) throw new Error("Teams are locked after allocation begins.");
+    if (this.quickPlayConfig) throw new Error("Quick Play keeps your assigned crew together.");
     if (player.teamId === teamId) return;
     if (this.countTeam(teamId) >= this.playersPerTeam) throw new Error("That crew is full.");
     if (this.captainIds[player.teamId] === player.id) this.captainIds[player.teamId] = undefined;
@@ -433,9 +565,11 @@ export class ArenaRoom extends Room {
     this.phase = "PLAYING";
     this.countdownDeadline = undefined;
     const now = performance.now();
-    this.matchDeadline = now + GAME_RULES.matchDurationSeconds * 1_000;
+    this.matchDeadline = now + this.matchSettings.matchDurationSeconds * 1_000;
     this.pickups = generatePickupLocations(this.roomId.split("").reduce((seed, char) => Math.imul(seed ^ char.charCodeAt(0), 16777619), 2166136261));
     this.activeContactPairs.clear();
+    this.helpPingExpiresAt.clear();
+    this.helpPingCooldownUntil.clear();
     this.poleHolders.BLUE = undefined;
     this.poleHolders.RED = undefined;
     this.resultWinnerOverride = null;
@@ -474,6 +608,14 @@ export class ArenaRoom extends Room {
     this.resolveContacts();
     this.finishIfTeamEliminated();
     this.sendSnapshots();
+  }
+
+  private requestHelpPing(player: ServerPlayer): void {
+    if (!player.connected || player.status === "ELIMINATED" || player.status === "DISCONNECTED") return;
+    const now = performance.now();
+    if (now < (this.helpPingCooldownUntil.get(player.id) ?? 0)) return;
+    this.helpPingExpiresAt.set(player.id, now + GAME_RULES.helpPingDurationSeconds * 1_000);
+    this.helpPingCooldownUntil.set(player.id, now + GAME_RULES.helpPingCooldownSeconds * 1_000);
   }
 
   private resetPositions(): void {
@@ -658,6 +800,7 @@ export class ArenaRoom extends Room {
     this.phase = "RESULTS";
     this.resultWinnerOverride = winnerOverride;
     this.matchDeadline = undefined;
+    this.helpPingExpiresAt.clear();
     for (const teamId of ["BLUE", "RED"] as const) {
       const raid = this.activeRaids[teamId];
       const raider = raid ? this.findById(raid.playerId) : undefined;
@@ -673,6 +816,8 @@ export class ArenaRoom extends Room {
     this.phase = "LOBBY";
     this.matchDeadline = undefined;
     this.pickups = [];
+    this.helpPingExpiresAt.clear();
+    this.helpPingCooldownUntil.clear();
     this.activeContactPairs.clear();
     this.poleHolders.BLUE = undefined;
     this.poleHolders.RED = undefined;
@@ -722,7 +867,8 @@ export class ArenaRoom extends Room {
         ...(candidate.teamId === self.teamId && candidate.startingPoints !== undefined ? { startingPoints: candidate.startingPoints } : {}),
       }));
       client.send("lobbySnapshot", lobbySnapshotSchema.parse({
-        roomCode: this.roomId, roomMode: this.roomMode, teamSize: this.playersPerTeam, phase: this.phase, selfPlayerId: self.id, voiceCredential: this.voiceCredentialFor(self), voiceRoomName: `${this.roomId}:round-${this.roundNumber}:${self.teamId}`, hostPlayerId: this.hostPlayerId,
+        roomCode: this.roomId, roomMode: this.roomMode, matchSettings: this.matchSettings, phase: this.phase, selfPlayerId: self.id, voiceCredential: this.voiceCredentialFor(self), voiceRoomName: `${this.roomId}:round-${this.roundNumber}:${self.teamId}`, hostPlayerId: this.hostPlayerId,
+        teamSelectionLocked: Boolean(this.quickPlayConfig),
         connectedPlayerCount, players,
         captainIds: { BLUE: this.captainIds.BLUE ?? null, RED: this.captainIds.RED ?? null },
         ownTeamAllocation: teammates.map((teammate) => ({ playerId: teammate.id, points: teammate.startingPoints ?? null })),
@@ -734,6 +880,14 @@ export class ArenaRoom extends Room {
 
   private sendSnapshots(): void {
     const now = performance.now();
+    const helpPings = [...this.helpPingExpiresAt].flatMap(([playerId, expiresAt]) => {
+      const player = this.findById(playerId);
+      if (expiresAt <= now || !player?.connected || player.status === "ELIMINATED" || player.status === "DISCONNECTED") {
+        this.helpPingExpiresAt.delete(playerId);
+        return [];
+      }
+      return [{ playerId, teamId: player.teamId, expiresAt }];
+    });
     const connectedPlayerCount = countConnectedPlayers(this.players.values());
     for (const client of this.clients) {
       const self = this.players.get(client.sessionId);
@@ -741,7 +895,7 @@ export class ArenaRoom extends Room {
       const ownRaid = this.activeRaids[self.teamId];
       const snapshot = projectSnapshot({
         phase: this.phase === "RESULTS" ? "RESULTS" : "PLAYING",
-        teamSize: this.playersPerTeam,
+        matchSettings: this.matchSettings,
         ...(this.hostPlayerId ? { hostPlayerId: this.hostPlayerId } : {}),
         self,
         players: [...this.players.values()],
@@ -750,6 +904,7 @@ export class ArenaRoom extends Room {
         now,
         remainingSeconds: this.phase === "RESULTS" || this.matchDeadline === undefined ? 0 : remainingSeconds(this.matchDeadline, now),
         pickups: this.pickups,
+        helpPings,
         raidStartedAt: ownRaid?.playerId === self.id ? ownRaid.startedAt : undefined,
         raidCooldownUntil: this.raidCooldownUntil[self.teamId],
         poleHolders: this.poleHolders,
@@ -758,4 +913,46 @@ export class ArenaRoom extends Room {
       client.send("snapshot", roomSnapshotSchema.parse(snapshot));
     }
   }
+}
+
+function parseQuickPlayRoomConfig(options: unknown): QuickPlayRoomConfig | undefined {
+  if (typeof options !== "object" || options === null || !("quickPlay" in options)) return undefined;
+  const candidate = options.quickPlay;
+  if (typeof candidate !== "object" || candidate === null || !("matchmakingRoomId" in candidate)
+    || !("handoffId" in candidate) || !("seats" in candidate) || !("credential" in candidate)
+    || typeof candidate.matchmakingRoomId !== "string" || !candidate.matchmakingRoomId
+    || typeof candidate.handoffId !== "string" || !candidate.handoffId
+    || typeof candidate.credential !== "string" || !Array.isArray(candidate.seats) || candidate.seats.length > 10) {
+    throw new ServerError(400, "Quick Play created an invalid handoff.");
+  }
+  const sessionIds = new Set<string>();
+  const playerIds = new Set<string>();
+  const seats: QuickPlayRoomSeat[] = [];
+  for (const rawSeat of candidate.seats) {
+    if (typeof rawSeat !== "object" || rawSeat === null || !("sessionId" in rawSeat)
+      || !("playerId" in rawSeat) || !("nickname" in rawSeat) || !("teamId" in rawSeat)
+      || typeof rawSeat.sessionId !== "string" || !rawSeat.sessionId
+      || typeof rawSeat.playerId !== "string" || !rawSeat.playerId
+      || typeof rawSeat.nickname !== "string"
+      || (rawSeat.teamId !== "BLUE" && rawSeat.teamId !== "RED")) {
+      throw new ServerError(400, "Quick Play created an invalid seat assignment.");
+    }
+    const nickname = rawSeat.nickname.trim();
+    if (!/^[\p{L}\p{N}_ -]{1,24}$/u.test(nickname) || sessionIds.has(rawSeat.sessionId) || playerIds.has(rawSeat.playerId)) {
+      throw new ServerError(400, "Quick Play created a duplicate or invalid player assignment.");
+    }
+    sessionIds.add(rawSeat.sessionId);
+    playerIds.add(rawSeat.playerId);
+    seats.push({ sessionId: rawSeat.sessionId, playerId: rawSeat.playerId, nickname, teamId: rawSeat.teamId });
+  }
+  const signed = verifyQuickPlayRoomCredential(candidate.credential);
+  if (!signed || signed.queueRoomId !== candidate.matchmakingRoomId || signed.handoffId !== candidate.handoffId
+    || JSON.stringify(signed.seats) !== JSON.stringify(seats)) {
+    throw new ServerError(403, "Quick Play room credentials are invalid or expired.");
+  }
+  return { matchmakingRoomId: candidate.matchmakingRoomId, handoffId: candidate.handoffId, seats };
+}
+
+function hasQuickPlayCredential(options: unknown): boolean {
+  return typeof options === "object" && options !== null && "quickPlayHandoff" in options;
 }

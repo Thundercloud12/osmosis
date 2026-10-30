@@ -1,5 +1,13 @@
 # OSMOSIS implementation decisions
 
+## 2026-10-29 — 4v4/5v5 match settings and Quick Play scope
+
+Official rooms support team sizes of four or five per side. Private matches default to 5v5 and 900 seconds, and allow durations from 300 to 1,800 seconds in 60-second steps. Quick Play uses 5-, 10-, 15- or 20-minute queue presets and matches only equal team sizes and durations. Parties stay together; queue assignment fills open slots with solos or compatible parties. Public Quick Play remains gated until abuse reporting and queue rate limits are available.
+
+Match settings are validated at room creation, owned by the server for the lifetime of the room and included in lobby/game/result snapshots. The matchmaking coordinator is in-process and ephemeral, consistent with the single-Node deployment; it introduces no database, broker or additional service. Quick Play joins an indivisible solo/party ticket to an exact 4v4 or 5v5 composition, assigns both teams server-side, then reserves seats in standard ArenaRooms. The queue remains attached until clients have joined and stored their Arena reconnect token; incomplete handoffs expire after the 120-second reconnect grace. A queue disconnect pauses eligibility during that same grace period. Production Quick Play is opt-in with `ENABLE_QUICK_PLAY=true`; it is enabled automatically outside production. Restarting the server clears parties and queues.
+
+Reports are validated and rate-limited in ArenaRoom, then emitted as structured `osmosis.abuse_report` JSON to server stdout; no report database or moderation console is added in this milestone. Public enablement remains an explicit deployment decision.
+
 ## 2026-10-25 — M0/M1 prototype tuning values
 
 The PRD explicitly leaves map dimensions, movement speed and view radius open for configuration and playtesting. The first visual prototype uses a 2400×1400 arena, 260 px/s movement, a 22 px player radius and a 430 px view radius. These values live only in the shared configuration and can be tuned without changing rules or module boundaries.
@@ -43,3 +51,7 @@ Unexpected disconnects reserve the player's room slot for up to 120 server-measu
 ## 2026-10-27 — Optional Global voice alongside private Team voice
 
 Keep the two private LiveKit Team rooms and add one match-wide Global room per round. Players may listen to Global without leaving their Team room; Global receive can be switched off independently. The microphone routes to exactly one selected target at a time and stays muted when switching targets. Full DEAFEN silences incoming audio from both channels. This uses the existing LiveKit service and server-minted channel-scoped tokens; it adds no voice provider or game-server media relay.
+
+## 2026-10-29 — Team-only Help ping
+
+Use one simple Help command on `G`; do not add Attack or Defend categories. The server takes the requester's authoritative position and includes the short-lived marker only in that team's snapshots. Teammates see a Help bubble above the requester and a pulse around their minimap marker for four seconds. A three-second per-player cooldown limits spam. The client never submits a ping location.
