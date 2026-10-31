@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AuthenticateToEcr",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PullOsmosisServerImage",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer"
+      ],
+      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/osmosis/game-server"
+    },
+    {
+      "Sid": "ReadOsmosisProductionParameters",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameters",
+      "Resource": [
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/CLIENT_ORIGINS",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/LIVEKIT_URL",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/LIVEKIT_API_KEY",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/LIVEKIT_API_SECRET",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/RECONNECT_SECRET",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/METRICS_TOKEN",
+        "arn:aws:ssm:REGION:ACCOUNT_ID:parameter/osmosis/prod/ENABLE_QUICK_PLAY"
+      ]
+    }
+  ]
+}

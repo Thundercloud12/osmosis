@@ -1,3 +1,4 @@
+
 name: CI and EC2 deployment
 
 on:
@@ -14,6 +15,7 @@ on:
       - "pnpm-workspace.yaml"
       - "tsconfig.base.json"
       - ".github/workflows/deploy-ec2.yml"
+
   pull_request:
     branches:
       - main
@@ -28,6 +30,7 @@ on:
       - "pnpm-workspace.yaml"
       - "tsconfig.base.json"
       - ".github/workflows/deploy-ec2.yml"
+
   workflow_dispatch:
 
 permissions:
@@ -41,6 +44,7 @@ jobs:
   checks:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -70,38 +74,252 @@ jobs:
 
   deploy:
     needs: checks
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+
     runs-on: ubuntu-latest
     timeout-minutes: 35
+
     permissions:
       contents: read
       id-token: write
+
     steps:
-      - name: Configure AWS credentials through GitHub OIDC
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
           role-session-name: osmosis-github-deploy
 
-      - name: Deploy exact commit through Systems Manager
+      - name: Build and push server image to ECR
+        id: image
         env:
-          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-          DEPLOY_SHA: ${{ github.sha }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          deploy_command="sudo -u ubuntu bash -lc 'cd /opt/osmosis && git fetch origin main --prune && git checkout --force --detach ${DEPLOY_SHA} && sudo docker compose --env-file deploy/production.env -f deploy/compose.production.yaml up -d --build --wait --wait-timeout 120'"
-          jq -n --arg command "$deploy_command" '{commands: [$command], executionTimeout: ["1800"]}' \
-            > "$RUNNER_TEMP/ssm-parameters.json"
+
+          account_id="$(aws sts get-caller-identity \
+            --query Account --output text)"
+
+          registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          image="${registry}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login \
+                --username AWS \
+                --password-stdin "$registry"
+
+          docker build \
+            --platform linux/amd64 \
+            --target server \
+            --tag "$image" \
+            .
+
+          docker push "$image"
+
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy through AWS Systems Manager
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          ECR_REGISTRY: ${{ steps.image.outputs.registry }}
+          GAME_SERVER_IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          set -euo pipefail
+
+          compose_b64="$(base64 -w0 deploy/compose.production.yaml)"
+
+          deploy_script="$(cat <<'SCRIPT'
+          set -eu
+
+          install -d -m 0755 /opt/osmosis/deploy
+
+          printf '%s' "$COMPOSE_B64" |
+            base64 -d > /opt/osmosis/deploy/compose.production.yaml
+
+          chmod 0644 /opt/osmosis/deploy/compose.production.yaml
+
+          command -v aws >/dev/null
+          command -v docker >/dev/null
+          command -v python3 >/dev/null
+
+          if command -v systemctl >/dev/null 2>&1 && \
+            ! systemctl is-active --quiet docker; then
+            systemctl start docker
+          fi
+          docker info >/dev/null
+
+          if ! docker compose version >/dev/null 2>&1; then
+            command -v curl >/dev/null
+            command -v sha256sum >/dev/null
+            install -d -m 0755 /usr/local/lib/docker/cli-plugins
+            compose_tmp="$(mktemp)"
+            trap 'rm -f "$compose_tmp"' 0
+            curl -fsSL --retry 3 \
+              https://github.com/docker/compose/releases/download/v5.6.1/docker-compose-linux-x86_64 \
+              -o "$compose_tmp"
+            printf '%s  %s\n' \
+              '47737f4236e6d3ccea7291995203f8f018058783b4c3a9469119811a0b5db8c0' \
+              "$compose_tmp" | sha256sum -c -
+            install -m 0755 "$compose_tmp" \
+              /usr/local/lib/docker/cli-plugins/docker-compose
+          fi
+
+          docker compose version >/dev/null
+
+          aws ecr get-login-password --region "$AWS_REGION" |
+            docker login \
+              --username AWS \
+              --password-stdin "$ECR_REGISTRY"
+
+          python3 - "$GAME_SERVER_IMAGE" \
+            "/opt/osmosis/deploy/compose.production.yaml" <<'PY'
+          import json
+          import os
+          import subprocess
+          import sys
+
+          image, compose_file = sys.argv[1:]
+
+          parameter_names = [
+              "/osmosis/prod/CLIENT_ORIGINS",
+              "/osmosis/prod/LIVEKIT_URL",
+              "/osmosis/prod/LIVEKIT_API_KEY",
+              "/osmosis/prod/LIVEKIT_API_SECRET",
+              "/osmosis/prod/RECONNECT_SECRET",
+              "/osmosis/prod/METRICS_TOKEN",
+              "/osmosis/prod/ENABLE_QUICK_PLAY",
+          ]
+
+          result = subprocess.run(
+              [
+                  "aws", "ssm", "get-parameters",
+                  "--names", *parameter_names,
+                  "--with-decryption",
+                  "--region", os.environ["AWS_REGION"],
+                  "--output", "json",
+              ],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+
+          parameters = json.loads(result.stdout)["Parameters"]
+
+          allowed = {
+              "CLIENT_ORIGINS",
+              "LIVEKIT_URL",
+              "LIVEKIT_API_KEY",
+              "LIVEKIT_API_SECRET",
+              "RECONNECT_SECRET",
+              "METRICS_TOKEN",
+              "ENABLE_QUICK_PLAY",
+          }
+
+          values = {}
+          for parameter in parameters:
+              name = parameter["Name"].rsplit("/", 1)[-1]
+              if name in allowed:
+                  values[name] = parameter["Value"]
+
+          required = {
+              "CLIENT_ORIGINS",
+              "RECONNECT_SECRET",
+              "METRICS_TOKEN",
+              "ENABLE_QUICK_PLAY",
+          }
+
+          missing = sorted(
+              name for name in required if not values.get(name)
+          )
+          if missing:
+              raise SystemExit(
+                  "Missing production parameters: "
+                  + ", ".join(missing)
+              )
+
+          livekit_names = {
+              "LIVEKIT_URL",
+              "LIVEKIT_API_KEY",
+              "LIVEKIT_API_SECRET",
+          }
+
+          present_livekit = {
+              name for name in livekit_names
+              if values.get(name)
+          }
+
+          if present_livekit and present_livekit != livekit_names:
+              raise SystemExit(
+                  "LiveKit requires URL, key and secret together"
+              )
+
+          env = os.environ.copy()
+          env.update(values)
+          env.setdefault("NODE_ENV", "production")
+          env["GAME_SERVER_IMAGE"] = image
+
+          command = [
+              "docker", "compose",
+              "-f", compose_file,
+          ]
+
+          subprocess.run(
+              command + ["pull", "game-server"],
+              check=True,
+              env=env,
+          )
+
+          subprocess.run(
+              command + [
+                  "up", "-d",
+                  "--no-build",
+                  "--wait",
+                  "--wait-timeout", "120",
+              ],
+              check=True,
+              env=env,
+          )
+
+          print("Osmosis deployment completed")
+          PY
+          SCRIPT
+          )"
+
+          # Quote each value for the remote shell.
+          printf -v header \
+            'AWS_REGION=%q\nECR_REGISTRY=%q\nGAME_SERVER_IMAGE=%q\nCOMPOSE_B64=%q\n' \
+            "$AWS_REGION" \
+            "$ECR_REGISTRY" \
+            "$GAME_SERVER_IMAGE" \
+            "$compose_b64"
+
+          remote_command="${header}${deploy_script}"
+
+          jq -n --arg command "$remote_command" \
+            '{
+              commands: [$command],
+              executionTimeout: ["1800"]
+            }' > "$RUNNER_TEMP/ssm-parameters.json"
 
           command_id="$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name AWS-RunShellScript \
-            --comment "Osmosis deploy ${DEPLOY_SHA}" \
+            --comment "Osmosis deployment $GITHUB_SHA" \
             --parameters "file://$RUNNER_TEMP/ssm-parameters.json" \
             --query 'Command.CommandId' \
             --output text)"
-          echo "Started deployment command $command_id"
+
+          echo "SSM command: $command_id"
 
           for attempt in $(seq 1 360); do
             status="$(aws ssm get-command-invocation \
@@ -109,31 +327,28 @@ jobs:
               --instance-id "$EC2_INSTANCE_ID" \
               --query Status \
               --output text 2>/dev/null || true)"
+
             case "$status" in
               Success)
-                aws ssm get-command-invocation \
-                  --command-id "$command_id" \
-                  --instance-id "$EC2_INSTANCE_ID" \
-                  --query StandardOutputContent \
-                  --output text
+                echo "Deployment successful"
                 exit 0
                 ;;
+
               Failed|TimedOut|DeliveryTimedOut|ExecutionTimedOut|Cancelled|Cancelling|Undeliverable|Terminated|InvalidPlatform|AccessDenied)
-                aws ssm get-command-invocation \
-                  --command-id "$command_id" \
-                  --instance-id "$EC2_INSTANCE_ID" \
-                  --query StandardOutputContent \
-                  --output text || true
+                echo "Deployment failed: $status"
+
                 aws ssm get-command-invocation \
                   --command-id "$command_id" \
                   --instance-id "$EC2_INSTANCE_ID" \
                   --query StandardErrorContent \
                   --output text || true
+
                 exit 1
                 ;;
             esac
+
             sleep 5
           done
 
-          echo "Timed out while waiting for the EC2 deployment command."
+          echo "Deployment timed out"
           exit 1
