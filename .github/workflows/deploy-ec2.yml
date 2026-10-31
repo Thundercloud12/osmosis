@@ -297,7 +297,7 @@ jobs:
 
           # Quote each value for the remote shell.
           printf -v header \
-            'AWS_REGION=%q\nECR_REGISTRY=%q\nGAME_SERVER_IMAGE=%q\nCOMPOSE_B64=%q\n' \
+            'export AWS_REGION=%q\nECR_REGISTRY=%q\nGAME_SERVER_IMAGE=%q\nCOMPOSE_B64=%q\n' \
             "$AWS_REGION" \
             "$ECR_REGISTRY" \
             "$GAME_SERVER_IMAGE" \
