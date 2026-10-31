@@ -17,7 +17,7 @@ services:
       RECONNECT_SECRET: ${RECONNECT_SECRET:?Required}
       METRICS_TOKEN: ${METRICS_TOKEN:?Required}
       ENABLE_QUICK_PLAY: ${ENABLE_QUICK_PLAY:-false}
-      ENABLE_TEST_ROOM_MODES: "false"
+      ENABLE_TEST_ROOM_MODES: "true"
 
     ports:
       - "127.0.0.1:2567:2567"

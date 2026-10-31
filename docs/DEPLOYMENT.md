@@ -62,7 +62,7 @@ existing Parameter Store copy if desired, and keep the systemd connector's
 working token at `/etc/cloudflared/token`. The GitHub deployment script does
 not request or pass that token to Docker Compose.
 
-`PORT=2567`, `NODE_ENV=production`, and `ENABLE_TEST_ROOM_MODES=false` are set
+`PORT=2567`, `NODE_ENV=production`, and `ENABLE_TEST_ROOM_MODES=true` are set
 by `deploy/compose.production.yaml`. The workflow supplies `GAME_SERVER_IMAGE`
 from the ECR URI and the commit/run-specific image tag.
 
@@ -81,6 +81,9 @@ Cloudflare Pages hosts the static client separately. Set its production
 `CLIENT_ORIGINS` to the exact Pages origin, such as
 `https://play.example.com`. Add any additional browser origin as a
 comma-separated value. The Colyseus SDK upgrades the secure endpoint to WSS.
+Set the Pages production build variable `VITE_ENABLE_TEST_ROOM_MODES=true` to
+show the 1v1 and 2v2 test selectors. These modes are available to any visitor;
+the selector is not an authorization boundary.
 
 ## GitHub Actions variables
 
