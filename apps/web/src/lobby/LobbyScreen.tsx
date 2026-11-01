@@ -36,6 +36,8 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
     window.requestAnimationFrame(() => tutorialButtonRef.current?.focus());
   }, []);
   const [roomMode, setRoomMode] = useState<RoomMode>("STANDARD");
+  const [entryMode, setEntryMode] = useState<"PRIVATE" | "QUICK_PLAY" | "PARTY" | "JOIN">("PRIVATE");
+  const [joinTarget, setJoinTarget] = useState<"ROOM" | "PARTY">("ROOM");
   const [teamSize, setTeamSize] = useState<4 | 5>(5);
   const [privateDuration, setPrivateDuration] = useState(15);
   const [quickPlayDuration, setQuickPlayDuration] = useState<QuickPlaySettings["matchDurationSeconds"]>(900);
@@ -49,6 +51,15 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
   const isHost = self?.isHost ?? false;
   const pointsByPlayer = new Map(lobby?.ownTeamAllocation.map((entry) => [entry.playerId, entry.points ?? 0]) ?? []);
   const totalPoints = [...pointsByPlayer.values()].reduce((sum, points) => sum + points, 0);
+  const activeEntryFormId = entryMode === "PRIVATE"
+    ? "private-entry-form"
+    : entryMode === "QUICK_PLAY"
+      ? "quickplay-entry-form"
+      : entryMode === "PARTY"
+        ? "party-entry-form"
+        : joinTarget === "ROOM"
+          ? "join-room-form"
+          : "join-party-form";
 
   function submitCreate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -145,53 +156,110 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
           </div>
           <div className="welcome-card">
             <div className="card-tab">YOUR CREW STARTS HERE</div>
-            <form onSubmit={submitCreate}>
+            <div className="entry-name-field">
               <label className="field-label" htmlFor="nickname">CREWMATE NAME · REQUIRED</label>
-              <input id="nickname" className="lobby-input" value={nickname} maxLength={24} placeholder="e.g. Starbean" required aria-required="true" aria-invalid={nameMissing && !nickname.trim()} aria-describedby={nameMissing && !nickname.trim() ? "nickname-error" : undefined} onInvalid={() => setNameMissing(true)} onChange={(event) => { setNickname(event.target.value); if (event.target.value.trim()) setNameMissing(false); }} />
+              <input id="nickname" form={activeEntryFormId} className="lobby-input" value={nickname} maxLength={24} placeholder="e.g. Starbean" required aria-required="true" aria-invalid={nameMissing && !nickname.trim()} aria-describedby={nameMissing && !nickname.trim() ? "nickname-error" : undefined} onInvalid={() => setNameMissing(true)} onChange={(event) => { setNickname(event.target.value); if (event.target.value.trim()) setNameMissing(false); }} />
               {nameMissing && !nickname.trim() && <p id="nickname-error" className="field-validation" role="alert">ENTER A CREWMATE NAME TO CONTINUE.</p>}
-              <label className="field-label room-mode-label" htmlFor="room-mode">ROOM MODE</label>
-              <select id="room-mode" className="lobby-input" value={roomMode} onChange={(event) => setRoomMode(event.target.value as RoomMode)}>
-                <option value="STANDARD">Standard match</option>
-                {testRoomModesEnabled && <>
-                  <option value="TEST_1V1">Test match · 1v1</option>
-                  <option value="TEST_2V2">Test match · 2v2</option>
-                </>}
-              </select>
-              {roomMode === "STANDARD" && <div className="lobby-settings-row">
-                <label className="field-label" htmlFor="private-team-size">TEAM SIZE</label>
-                <select id="private-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
-              </div>}
-              <label className="field-label room-mode-label" htmlFor="private-duration">MATCH LENGTH</label>
-              <select id="private-duration" className="lobby-input" value={privateDuration} onChange={(event) => setPrivateDuration(Number(event.target.value))}>
-                {Array.from({ length: 26 }, (_, index) => index + 5).map((minutes) => <option value={minutes} key={minutes}>{minutes} minutes</option>)}
-              </select>
-              <button type="submit" className="play-button" disabled={networkStatus.state === "connecting"}>
-                {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE A ROOM"}<span>→</span>
-              </button>
-            </form>
-            <div className="or-divider"><span /> OR JOIN YOUR FRIENDS <span /></div>
-            <form onSubmit={submitJoin} className="join-form">
-              <label className="field-label" htmlFor="room-code">ROOM CODE</label>
-              <div className="join-row"><input id="room-code" className="lobby-input code-input" value={roomCode} maxLength={6} placeholder="6 LETTERS" onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={roomCode.length !== 6}>JOIN</button></div>
-            </form>
-            <section className="quickplay-entry">
-              <div className="or-divider"><span /> QUICK PLAY <span /></div>
-              <div className="quickplay-settings-row">
-                <label className="field-label" htmlFor="quickplay-team-size">TEAM SIZE</label>
-                <select id="quickplay-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4v4</option><option value={5}>5v5</option></select>
-                <label className="field-label" htmlFor="quickplay-duration">MATCH LENGTH</label>
-                <select id="quickplay-duration" className="lobby-input" value={quickPlayDuration} onChange={(event) => setQuickPlayDuration(Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"])}>
-                  {[300, 600, 900, 1200].map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
-                </select>
-              </div>
-              <button type="button" className="play-button quickplay-button" disabled={networkStatus.state === "connecting"} onClick={() => submitQuickPlay("solo")}>PLAY QUICK PLAY <span>✦</span></button>
-              <button type="button" className="join-button quickplay-party-button" disabled={networkStatus.state === "connecting"} onClick={() => submitQuickPlay("party")}>CREATE A CREW PARTY</button>
-              <form onSubmit={submitJoinParty} className="join-form party-code-form">
-                <label className="field-label" htmlFor="party-code">JOIN A CREW PARTY</label>
-                <div className="join-row"><input id="party-code" className="lobby-input code-input" value={partyCode} maxLength={6} placeholder="6 LETTERS" onChange={(event) => setPartyCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={partyCode.length !== 6 || networkStatus.state === "connecting"}>JOIN</button></div>
-              </form>
-              <p className="matchmaking-entry-note">Parties stay together. Quick Play fills open crew spots with compatible players.</p>
+            </div>
+            <div className="entry-mode-picker" role="group" aria-label="Choose how to play">
+              <button type="button" className={entryMode === "PRIVATE" ? "is-selected" : ""} aria-pressed={entryMode === "PRIVATE"} onClick={() => setEntryMode("PRIVATE")}>Private room</button>
+              <button type="button" className={entryMode === "QUICK_PLAY" ? "is-selected" : ""} aria-pressed={entryMode === "QUICK_PLAY"} onClick={() => setEntryMode("QUICK_PLAY")}>Quick Play</button>
+              <button type="button" className={entryMode === "PARTY" ? "is-selected" : ""} aria-pressed={entryMode === "PARTY"} onClick={() => setEntryMode("PARTY")}>Crew party</button>
+              <button type="button" className={entryMode === "JOIN" ? "is-selected" : ""} aria-pressed={entryMode === "JOIN"} onClick={() => setEntryMode("JOIN")}>Join by code</button>
+            </div>
+
+            <section className="entry-mode-panel" aria-label={`${entryMode === "PRIVATE" ? "Private room" : entryMode === "QUICK_PLAY" ? "Quick Play" : entryMode === "PARTY" ? "Crew party" : "Join with a code"} options`}>
+              {entryMode === "PRIVATE" && <>
+                <div className="entry-panel-copy"><strong>HOST A PRIVATE MATCH</strong><span>Invite your crew with a room code.</span></div>
+                <form id="private-entry-form" onSubmit={submitCreate}>
+                  <div className="entry-field">
+                    <label className="field-label" htmlFor="room-mode">ROOM MODE</label>
+                    <select id="room-mode" className="lobby-input" value={roomMode} onChange={(event) => setRoomMode(event.target.value as RoomMode)}>
+                      <option value="STANDARD">Standard match</option>
+                      {testRoomModesEnabled && <>
+                        <option value="TEST_1V1">Test match · 1v1</option>
+                        <option value="TEST_2V2">Test match · 2v2</option>
+                      </>}
+                    </select>
+                  </div>
+                  <div className={`entry-settings-grid ${roomMode !== "STANDARD" ? "single-setting" : ""}`}>
+                    {roomMode === "STANDARD" && <div className="entry-field">
+                      <label className="field-label" htmlFor="private-team-size">TEAM SIZE</label>
+                      <select id="private-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
+                    </div>}
+                    <div className="entry-field">
+                      <label className="field-label" htmlFor="private-duration">MATCH LENGTH</label>
+                      <select id="private-duration" className="lobby-input" value={privateDuration} onChange={(event) => setPrivateDuration(Number(event.target.value))}>
+                        {Array.from({ length: 26 }, (_, index) => index + 5).map((minutes) => <option value={minutes} key={minutes}>{minutes} minutes</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <button type="submit" className="play-button entry-submit" disabled={networkStatus.state === "connecting"}>
+                    {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE PRIVATE ROOM"}<span>→</span>
+                  </button>
+                </form>
+              </>}
+
+              {entryMode === "QUICK_PLAY" && <>
+                <div className="entry-panel-copy"><strong>FIND YOUR NEXT MATCH</strong><span>We’ll match you with players looking for a game.</span></div>
+                <form id="quickplay-entry-form" onSubmit={(event) => { event.preventDefault(); submitQuickPlay("solo"); }}>
+                  <div className="entry-settings-grid">
+                    <div className="entry-field">
+                      <label className="field-label" htmlFor="quickplay-team-size">TEAM SIZE</label>
+                      <select id="quickplay-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
+                    </div>
+                    <div className="entry-field">
+                      <label className="field-label" htmlFor="quickplay-duration">MATCH LENGTH</label>
+                      <select id="quickplay-duration" className="lobby-input" value={quickPlayDuration} onChange={(event) => setQuickPlayDuration(Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"])}>
+                        {[300, 600, 900, 1200].map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <button type="submit" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"}>
+                    {networkStatus.state === "connecting" ? "CONNECTING…" : "PLAY QUICK PLAY"}<span>✦</span>
+                  </button>
+                </form>
+              </>}
+
+              {entryMode === "PARTY" && <>
+                <div className="entry-panel-copy"><strong>BRING YOUR CREW</strong><span>Start a party, then invite friends to queue together.</span></div>
+                <form id="party-entry-form" onSubmit={(event) => { event.preventDefault(); submitQuickPlay("party"); }}>
+                  <div className="entry-settings-grid">
+                    <div className="entry-field">
+                      <label className="field-label" htmlFor="party-team-size">TEAM SIZE</label>
+                      <select id="party-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
+                    </div>
+                    <div className="entry-field">
+                      <label className="field-label" htmlFor="party-duration">MATCH LENGTH</label>
+                      <select id="party-duration" className="lobby-input" value={quickPlayDuration} onChange={(event) => setQuickPlayDuration(Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"])}>
+                        {[300, 600, 900, 1200].map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <button type="submit" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"}>
+                    {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE A CREW PARTY"}<span>→</span>
+                  </button>
+                </form>
+              </>}
+
+              {entryMode === "JOIN" && <>
+                <div className="entry-panel-copy"><strong>JOIN YOUR FRIENDS</strong><span>Choose the invite code you received.</span></div>
+                <div className="join-target-picker" role="group" aria-label="Type of invite code">
+                  <button type="button" className={joinTarget === "ROOM" ? "is-selected" : ""} aria-pressed={joinTarget === "ROOM"} onClick={() => setJoinTarget("ROOM")}>Room code</button>
+                  <button type="button" className={joinTarget === "PARTY" ? "is-selected" : ""} aria-pressed={joinTarget === "PARTY"} onClick={() => setJoinTarget("PARTY")}>Party code</button>
+                </div>
+                {joinTarget === "ROOM"
+                  ? <form id="join-room-form" onSubmit={submitJoin} className="entry-code-form">
+                    <label className="field-label" htmlFor="room-code">ROOM CODE · 6 LETTERS</label>
+                    <div className="join-row"><input id="room-code" className="lobby-input code-input" value={roomCode} maxLength={6} placeholder="ABC123" onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={roomCode.length !== 6 || networkStatus.state === "connecting"}>JOIN ROOM</button></div>
+                  </form>
+                  : <form id="join-party-form" onSubmit={submitJoinParty} className="entry-code-form">
+                    <label className="field-label" htmlFor="party-code">PARTY CODE · 6 LETTERS</label>
+                    <div className="join-row"><input id="party-code" className="lobby-input code-input" value={partyCode} maxLength={6} placeholder="ABC123" onChange={(event) => setPartyCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={partyCode.length !== 6 || networkStatus.state === "connecting"}>JOIN PARTY</button></div>
+                  </form>}
+              </>}
             </section>
+
             {error && <p className="lobby-error" role="alert">{error}</p>}
             {networkStatus.state === "connecting" && <p className="connecting-note">Finding your airlock…</p>}
           </div>
