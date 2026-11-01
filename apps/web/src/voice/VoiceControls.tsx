@@ -11,6 +11,8 @@ type Props = {
 };
 
 type Sessions = Partial<Record<VoiceChannel, VoiceChannelSession>>;
+type VoiceRetry = { kind: "team" } | { kind: "global"; listen: boolean } | { kind: "microphone" };
+type VoiceError = { message: string; retry: VoiceRetry | null };
 
 export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connected, inMatch = false, teamId }: Props) {
   const sessionsRef = useRef<Sessions>({});
@@ -31,7 +33,12 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
   const [globalSpeaking, setGlobalSpeaking] = useState(false);
   const [teamBusy, setTeamBusy] = useState(false);
   const [globalBusy, setGlobalBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [voiceError, setVoiceError] = useState<VoiceError | null>(null);
+
+  const reportError = useCallback((message: string, retry: VoiceRetry | null = null) => {
+    setVoiceError({ message, retry });
+  }, []);
+  const clearError = useCallback(() => setVoiceError(null), []);
 
   const createSession = useCallback((channel: VoiceChannel) => {
     let session: VoiceChannelSession;
@@ -43,29 +50,29 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
       onUnexpectedDisconnect: () => {
         if (sessionsRef.current[channel] !== session) return;
         delete sessionsRef.current[channel];
+        let retry: VoiceRetry;
         if (channel === "TEAM") {
           teamOptInRef.current = false;
           setTeamJoined(false);
           setTeamSpeaking(false);
+          retry = { kind: "team" };
         } else {
+          const shouldListen = globalListenRef.current;
           globalListenRef.current = false;
           setGlobalListen(false);
           setGlobalConnected(false);
           setGlobalSpeaking(false);
-          if (talkTargetRef.current === "GLOBAL") {
-            talkTargetRef.current = "TEAM";
-            setTalkTarget("TEAM");
-          }
+          retry = { kind: "global", listen: shouldListen };
         }
         micEnabledRef.current = false;
         setMicEnabled(false);
-        setError(`${channel === "TEAM" ? "Team" : "Global"} voice disconnected. Rejoin to continue.`);
+        reportError(`${channel === "TEAM" ? "Team" : "Global"} voice disconnected. Retry the connection.`, retry);
       },
     });
     session.setDeafened(deafenedRef.current);
     if (channel === "GLOBAL") session.setListening(globalListenRef.current);
     return session;
-  }, []);
+  }, [reportError]);
 
   const ensureSession = useCallback(async (channel: VoiceChannel): Promise<VoiceChannelSession> => {
     const current = sessionsRef.current[channel];
@@ -89,7 +96,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
         session.setListening(globalListenRef.current);
         setGlobalConnected(true);
       }
-      setError("");
+      clearError();
       return session;
     }).catch((connectError: unknown) => {
       if (sessionsRef.current[channel] === session) delete sessionsRef.current[channel];
@@ -99,7 +106,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     });
     pendingRef.current[channel] = request;
     return request;
-  }, [createSession, roomCode, voiceCredential]);
+  }, [clearError, createSession, roomCode, voiceCredential]);
 
   const disconnectChannel = useCallback(async (channel: VoiceChannel) => {
     const session = sessionsRef.current[channel];
@@ -123,13 +130,20 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
   }, [disconnectChannel]);
 
   const restoreOptedInChannels = useCallback(async () => {
-    const restore: Promise<VoiceChannelSession>[] = [];
-    if (teamOptInRef.current) restore.push(ensureSession("TEAM"));
-    if (globalListenRef.current || talkTargetRef.current === "GLOBAL") restore.push(ensureSession("GLOBAL"));
-    const results = await Promise.allSettled(restore);
-    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failure) setError(failure.reason instanceof Error ? failure.reason.message : "Voice could not reconnect.");
-  }, [ensureSession]);
+    const channels: VoiceChannel[] = [];
+    if (teamOptInRef.current) channels.push("TEAM");
+    if (globalListenRef.current || talkTargetRef.current === "GLOBAL") channels.push("GLOBAL");
+    const results = await Promise.allSettled(channels.map((channel) => ensureSession(channel)));
+    const failedIndex = results.findIndex((result) => result.status === "rejected");
+    if (failedIndex < 0) return;
+    const failure = results[failedIndex];
+    if (failure?.status !== "rejected") return;
+    const channel = channels[failedIndex] ?? "GLOBAL";
+    const retry: VoiceRetry = channel === "TEAM"
+      ? { kind: "team" }
+      : { kind: "global", listen: globalListenRef.current };
+    reportError(failure.reason instanceof Error ? failure.reason.message : "Voice could not reconnect.", retry);
+  }, [ensureSession, reportError]);
 
   useEffect(() => {
     const roundChanged = roomNameRef.current !== voiceRoomName;
@@ -137,7 +151,9 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     if (!connected || roundChanged) {
       void disconnectAll().then(() => {
         if (!connected) {
-          setError("Voice paused while reconnecting to the game.");
+          if (teamOptInRef.current || globalListenRef.current || talkTargetRef.current === "GLOBAL") {
+            reportError("Voice is paused until the game reconnects.");
+          }
           return;
         }
         void restoreOptedInChannels();
@@ -145,7 +161,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     } else {
       void restoreOptedInChannels();
     }
-  }, [connected, voiceRoomName, disconnectAll, restoreOptedInChannels]);
+  }, [connected, voiceRoomName, disconnectAll, reportError, restoreOptedInChannels]);
 
   useEffect(() => () => { void disconnectAll(); }, [disconnectAll]);
 
@@ -157,7 +173,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
       await ensureSession("TEAM");
     } catch (joinError) {
       teamOptInRef.current = false;
-      setError(joinError instanceof Error ? joinError.message : "Could not join team voice.");
+      reportError(joinError instanceof Error ? joinError.message : "Could not join Team voice.", { kind: "team" });
     } finally {
       setTeamBusy(false);
     }
@@ -176,18 +192,18 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
         sessionsRef.current.GLOBAL?.setListening(false);
         if (talkTargetRef.current !== "GLOBAL") await disconnectChannel("GLOBAL");
       }
-      setError("");
+      clearError();
     } catch (listenError) {
       globalListenRef.current = false;
       setGlobalListen(false);
-      setError(listenError instanceof Error ? listenError.message : "Could not join Global voice.");
+      reportError(listenError instanceof Error ? listenError.message : "Could not connect to Global voice.", enabled ? { kind: "global", listen: true } : null);
     } finally {
       setGlobalBusy(false);
     }
   };
 
   const selectTalkTarget = async (channel: VoiceChannel) => {
-    if (talkTargetRef.current === channel) return;
+    if (talkTargetRef.current === channel || globalBusy) return;
     const previous = talkTargetRef.current;
     const previousSession = sessionsRef.current[previous];
     try {
@@ -198,16 +214,15 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
       setTalkTarget(channel);
       if (channel === "GLOBAL" && connected) {
         setGlobalBusy(true);
-        await ensureSession("GLOBAL");
-        sessionsRef.current.GLOBAL?.setListening(globalListenRef.current);
+        const session = await ensureSession("GLOBAL");
+        session.setListening(globalListenRef.current);
       } else if (channel === "TEAM" && !globalListenRef.current) {
         await disconnectChannel("GLOBAL");
       }
-      setError("");
+      clearError();
     } catch (targetError) {
-      talkTargetRef.current = previous;
-      setTalkTarget(previous);
-      setError(targetError instanceof Error ? targetError.message : "Could not switch voice channel.");
+      reportError(targetError instanceof Error ? targetError.message : `Could not select ${channel === "TEAM" ? "Team" : "Global"} for your microphone.`,
+        channel === "GLOBAL" ? { kind: "global", listen: globalListenRef.current } : null);
     } finally {
       setGlobalBusy(false);
     }
@@ -217,7 +232,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     if (!connected || !enabled && !micEnabledRef.current) return;
     const channel = talkTargetRef.current;
     if (channel === "TEAM" && !teamOptInRef.current) {
-      setError("Join Team voice before transmitting to your team.");
+      reportError("Join Team voice before sending your microphone to your team.");
       return;
     }
     try {
@@ -227,11 +242,38 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
       await sessionsRef.current[channel]?.setMicrophoneEnabled(enabled);
       micEnabledRef.current = enabled;
       setMicEnabled(enabled);
-      setError("");
+      clearError();
     } catch (micError) {
       micEnabledRef.current = false;
       setMicEnabled(false);
-      setError(micError instanceof Error ? micError.message : "Microphone permission was denied.");
+      reportError(micError instanceof Error ? micError.message : "Microphone permission was denied.", enabled ? { kind: "microphone" } : null);
+    }
+  };
+
+  const retryVoice = async () => {
+    if (!voiceError?.retry) return;
+    const retry = voiceError.retry;
+    if (retry.kind === "team") {
+      await joinTeamVoice();
+      return;
+    }
+    if (retry.kind === "microphone") {
+      await setTargetMicEnabled(true);
+      return;
+    }
+
+    if (!connected || globalBusy) return;
+    globalListenRef.current = retry.listen;
+    setGlobalListen(retry.listen);
+    setGlobalBusy(true);
+    try {
+      const session = await ensureSession("GLOBAL");
+      session.setListening(retry.listen);
+      clearError();
+    } catch (retryError) {
+      reportError(retryError instanceof Error ? retryError.message : "Could not reconnect to Global voice.", retry);
+    } finally {
+      setGlobalBusy(false);
     }
   };
 
@@ -242,11 +284,13 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     setGlobalListen(false);
     setTalkTarget("TEAM");
     await disconnectAll();
-    setError("");
+    clearError();
   };
 
+  const canTransmit = connected && (talkTarget === "GLOBAL" ? globalConnected : teamJoined);
+
   useEffect(() => {
-    if (!teamJoined && !globalConnected) return;
+    if (!canTransmit) return;
     const down = (event: KeyboardEvent) => {
       const target = event.target;
       const editing = target instanceof HTMLElement && (target.isContentEditable || Boolean(target.closest("input, textarea, select")));
@@ -256,7 +300,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     };
     window.addEventListener("keydown", down);
     return () => window.removeEventListener("keydown", down);
-  }, [teamJoined, globalConnected]);
+  }, [canTransmit, setTargetMicEnabled]);
 
   const toggleDeafened = () => {
     const next = !deafenedRef.current;
@@ -266,29 +310,71 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     sessionsRef.current.GLOBAL?.setDeafened(next);
   };
 
-  const canTransmit = talkTarget === "GLOBAL" ? globalConnected : teamJoined;
   const remoteSpeaking = teamSpeaking || (globalListen && globalSpeaking);
+  const voiceStatus = remoteSpeaking
+    ? "CREWMATE SPEAKING"
+    : !connected
+      ? "GAME RECONNECTING"
+      : teamJoined || globalConnected
+        ? "VOICE CONNECTED"
+        : "VOICE NOT CONNECTED";
 
-  return <aside className={`voice-dock ${inMatch ? "is-match" : ""} ${teamId === "RED" ? "voice-red" : ""}`} aria-label="Voice channels">
-    <span className={`voice-dot ${remoteSpeaking ? "is-speaking" : ""}`} />
-    <span className="voice-label">{remoteSpeaking ? "CREWMATE TALKING" : "VOICE"}</span>
-    {!teamJoined
-      ? <button disabled={teamBusy || !connected} onClick={() => void joinTeamVoice()}>{teamBusy ? "CONNECTING…" : "JOIN TEAM"}</button>
-      : <span className="voice-channel-status">TEAM READY</span>}
-    <button disabled={globalBusy || !connected} onClick={() => void setGlobalListening(!globalListen)} aria-pressed={globalListen}>
-      {globalBusy ? "CONNECTING…" : globalListen ? "GLOBAL ON" : "GLOBAL OFF"}
-    </button>
-    <button disabled={globalBusy || !connected} onClick={() => void selectTalkTarget(talkTarget === "TEAM" ? "GLOBAL" : "TEAM")} aria-pressed={talkTarget === "GLOBAL"}>
-      TALK: {talkTarget}
-    </button>
-    {canTransmit && <button className={micEnabled ? "voice-active" : ""} onClick={() => void setTargetMicEnabled(!micEnabled)} title={`Toggle ${talkTarget.toLowerCase()} microphone`} aria-pressed={micEnabled}>
-      {micEnabled ? "MIC ON" : "MIC OFF"}
-    </button>}
-    {(teamJoined || globalConnected) && <>
-      <button className={deafened ? "voice-active" : ""} onClick={toggleDeafened} aria-pressed={deafened}>{deafened ? "DEAFENED" : "DEAFEN"}</button>
-      <button className="voice-leave" disabled={teamBusy || globalBusy} onClick={() => void leaveVoice()}>LEAVE</button>
-    </>}
-    {(teamJoined || globalConnected) && <small>V toggles {talkTarget.toLowerCase()} mic</small>}
-    {error && <small className="voice-error" title={error}>VOICE ISSUE</small>}
+  return <aside className={`voice-dock ${inMatch ? "is-match" : ""} ${teamId === "RED" ? "voice-red" : ""}`} aria-label="Voice controls">
+    <header className="voice-dock-header">
+      <span className={`voice-dot ${remoteSpeaking ? "is-speaking" : ""}`} aria-hidden="true" />
+      <strong>VOICE</strong>
+      <span className="voice-overall-status" role="status" aria-live="polite">{voiceStatus}</span>
+    </header>
+
+    <section className="voice-control-section" aria-label="Listening channels">
+      <h2>LISTEN</h2>
+      <div className="voice-listen-actions">
+        {teamJoined
+          ? <span className="voice-channel-connected"><span>Team voice</span><strong>Joined</strong></span>
+          : <button className="voice-channel-button" disabled={!connected || teamBusy} onClick={() => void joinTeamVoice()}>
+            {teamBusy ? "Connecting to Team…" : "Join Team voice"}
+          </button>}
+        <button className="voice-channel-button" disabled={!connected || globalBusy} onClick={() => void setGlobalListening(!globalListen)} aria-pressed={globalListen}>
+          <span>Listen to Global</span><strong>{globalBusy ? "Connecting…" : globalListen ? "On" : "Off"}</strong>
+        </button>
+      </div>
+    </section>
+
+    <section className="voice-control-section" aria-label="Microphone controls">
+      <h2>MIC SENDS TO</h2>
+      <div className="voice-transmit-row">
+        <div className="voice-destination" role="group" aria-label="Microphone destination">
+          <button className={talkTarget === "TEAM" ? "is-selected" : ""} aria-pressed={talkTarget === "TEAM"} disabled={!connected || globalBusy} onClick={() => void selectTalkTarget("TEAM")}>Team</button>
+          <button className={talkTarget === "GLOBAL" ? "is-selected" : ""} aria-pressed={talkTarget === "GLOBAL"} disabled={!connected || globalBusy} onClick={() => void selectTalkTarget("GLOBAL")}>Global</button>
+        </div>
+        <button className={`voice-mic-button ${micEnabled ? "voice-active" : ""}`} disabled={!canTransmit || teamBusy || globalBusy} onClick={() => void setTargetMicEnabled(!micEnabled)} aria-pressed={micEnabled}>
+          {micEnabled ? "Mute microphone" : "Enable microphone"}
+        </button>
+      </div>
+      <p className="voice-mic-hint">
+        {!connected
+          ? "Reconnect to the game to use voice."
+          : talkTarget === "TEAM" && !teamJoined
+            ? "Join Team voice above to send your mic to your crew."
+            : talkTarget === "GLOBAL" && !globalConnected
+              ? "Connecting to Global voice before your mic can send."
+              : micEnabled
+                ? `Your microphone is live on ${talkTarget === "TEAM" ? "Team" : "Global"}. Press V or the button to mute.`
+                : `Your microphone is muted. Enable it to talk on ${talkTarget === "TEAM" ? "Team" : "Global"}. Press V to toggle.`}
+      </p>
+    </section>
+
+    {(teamJoined || globalConnected) && <div className="voice-utility-actions">
+      <button className={`voice-utility-button ${deafened ? "voice-active" : ""}`} onClick={toggleDeafened} aria-pressed={deafened}>
+        {deafened ? "Audio deafened" : "Deafen audio"}
+      </button>
+      <button className="voice-leave" disabled={teamBusy || globalBusy} onClick={() => void leaveVoice()}>Leave voice</button>
+    </div>}
+
+    {voiceError && <div className="voice-error" role="alert">
+      <p><strong>Voice connection issue</strong><span>{voiceError.message}</span></p>
+      {voiceError.retry && <button className="voice-retry" disabled={!connected || teamBusy || globalBusy} onClick={() => void retryVoice()}>Retry</button>}
+      <button className="voice-dismiss" aria-label="Dismiss voice error" onClick={clearError}>×</button>
+    </div>}
   </aside>;
 }
