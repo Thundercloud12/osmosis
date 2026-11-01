@@ -16,6 +16,8 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
   const party = snapshot?.party;
   const queue = snapshot?.queue;
   const isLeader = Boolean(party && party.leaderId === snapshot?.selfPlayerId);
+  const partyOnlineCount = party?.members.filter((member) => member.connected).length ?? 0;
+  const partyReconnectingCount = (party?.members.length ?? 0) - partyOnlineCount;
 
   async function copyInvite(): Promise<void> {
     if (!party) return;
@@ -48,6 +50,10 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
           <div className="invite-strip"><span>YOUR CREW INVITE CODE</span><strong>{party.code}</strong><button className="copy-button" onClick={() => void copyInvite()}>{copied ? "COPIED! ✓" : "COPY INVITE ↗"}</button><span className="player-count">{party.members.length}/{party.settings.teamSize} CREW</span></div>
           <section className="matchmaking-party-card">
             <header className="team-card-heading"><span className="team-emblem"><img src="/assets/characters/astronaut.png" alt="" /></span><div><p>THESE CREWMATES STAY TOGETHER</p><h2>Open spots fill with players in Quick Play</h2></div><strong>{party.members.length}/{party.settings.teamSize}</strong></header>
+            <div className="team-presence-summary" role="group" aria-label={`${partyOnlineCount} of ${party.settings.teamSize} party players online${partyReconnectingCount ? `, ${partyReconnectingCount} reconnecting` : ""}`}>
+              <span className="presence-online"><i aria-hidden="true" />{partyOnlineCount}/{party.settings.teamSize} online</span>
+              {partyReconnectingCount > 0 && <span className="presence-reconnecting"><i aria-hidden="true" />{partyReconnectingCount} reconnecting</span>}
+            </div>
             <div className="roster-list">{Array.from({ length: party.settings.teamSize }, (_, index) => {
               const member = party.members[index];
               return <div className={`roster-slot ${member ? "occupied" : "empty"}`} key={member?.id ?? `empty-${index}`}>
@@ -55,6 +61,7 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
                 <span className="crew-name">{member?.nickname ?? "Open for a crewmate"}</span>
                 {member?.id === party.leaderId && <small className="role-badge host-badge">LEADER</small>}
                 {member && !member.connected && <small className="offline-badge">RECONNECTING</small>}
+                {member?.connected && <small className="online-badge">ONLINE</small>}
               </div>;
             })}</div>
             <div className="matchmaking-settings">

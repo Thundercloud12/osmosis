@@ -15,6 +15,8 @@ export function GameHud({ snapshot, error, reportNotice, onCommand, onLeave, net
   const ownColor = ownTeam === "BLUE" ? "#438fc9" : "#e87879";
   const ownPoints = self?.points ?? 0;
   const enemyTeam = ownTeam === "BLUE" ? "RED" : "BLUE";
+  const ownPresence = snapshot?.teamPresence?.[ownTeam];
+  const enemyPresence = snapshot?.teamPresence?.[enemyTeam];
   const linkedTeammate = snapshot?.players.find((player) => player.id === self?.linkedPlayerId);
   const frozenSeconds = self?.frozenSecondsRemaining ?? 0;
   const statusLabel = frozenSeconds > 0 ? "FROZEN" : self?.status ?? "CONNECTING";
@@ -43,11 +45,21 @@ export function GameHud({ snapshot, error, reportNotice, onCommand, onLeave, net
       <div className={`match-score-card ${ownTeam === "BLUE" ? "score-blue" : "score-red"}`}>
         <span>{ownTeam === "BLUE" ? "BLUE CREW" : "RED CREW"}</span><strong>{snapshot?.teamScores[ownTeam]?.toLocaleString() ?? "—"}</strong>
         <small>YOUR SCORE · {ownPoints.toLocaleString()}</small>
+        {ownPresence && <div className="team-presence" role="group" aria-label={`${ownPresence.online} of ${ownPresence.total} teammates online${ownPresence.reconnecting ? `, ${ownPresence.reconnecting} reconnecting` : ""}${ownPresence.offline ? `, ${ownPresence.offline} offline` : ""}`}>
+          <span className="presence-count presence-online"><i aria-hidden="true" />{ownPresence.online}/{ownPresence.total} online</span>
+          {ownPresence.reconnecting > 0 && <span className="presence-count presence-reconnecting"><i aria-hidden="true" />{ownPresence.reconnecting} reconnecting</span>}
+          {ownPresence.offline > 0 && <span className="presence-count presence-offline"><i aria-hidden="true" />{ownPresence.offline} offline</span>}
+        </div>}
       </div>
         <div className="match-clock"><span>TIME LEFT</span><strong>{minutes}:{seconds}</strong><small>{statusLabel}</small><ConnectionQualityIndicator networkStatus={networkStatus} /></div>
       <div className={`match-score-card ${ownTeam === "BLUE" ? "score-red" : "score-blue"}`}>
         <span>{enemyTeam} CREW</span><strong>HIDDEN</strong>
         <small>OPPONENT SCORE</small>
+        {enemyPresence && <div className="team-presence" role="group" aria-label={`${enemyPresence.online} of ${enemyPresence.total} opponents online${enemyPresence.reconnecting ? `, ${enemyPresence.reconnecting} reconnecting` : ""}${enemyPresence.offline ? `, ${enemyPresence.offline} offline` : ""}`}>
+          <span className="presence-count presence-online"><i aria-hidden="true" />{enemyPresence.online}/{enemyPresence.total} online</span>
+          {enemyPresence.reconnecting > 0 && <span className="presence-count presence-reconnecting"><i aria-hidden="true" />{enemyPresence.reconnecting} reconnecting</span>}
+          {enemyPresence.offline > 0 && <span className="presence-count presence-offline"><i aria-hidden="true" />{enemyPresence.offline} offline</span>}
+        </div>}
       </div>
     </div>
     <div className="match-bottom-left">

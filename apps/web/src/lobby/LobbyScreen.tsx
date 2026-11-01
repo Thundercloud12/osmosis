@@ -275,9 +275,15 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
           <div className="lobby-grid">
             {teams.map((team) => {
               const roster = lobby.players.filter((player) => player.teamId === team.id);
+              const onlineCount = roster.filter((player) => player.connected).length;
+              const reconnectingCount = roster.length - onlineCount;
               const captainId = lobby.captainIds[team.id];
               return <section className={`team-card team-card-${team.color}`} key={team.id}>
                 <header className="team-card-heading"><span className="team-emblem"><img src="/assets/characters/astronaut.png" alt="" /></span><div><p>{team.id === "BLUE" ? "COOL AS COSMOS" : "A LITTLE BIT BOLD"}</p><h2>{team.label}</h2></div><strong>{roster.length}/{lobby.matchSettings.teamSize}</strong></header>
+                <div className="team-presence-summary" role="group" aria-label={`${onlineCount} of ${lobby.matchSettings.teamSize} players online${reconnectingCount ? `, ${reconnectingCount} reconnecting` : ""}`}>
+                  <span className="presence-online"><i aria-hidden="true" />{onlineCount}/{lobby.matchSettings.teamSize} online</span>
+                  {reconnectingCount > 0 && <span className="presence-reconnecting"><i aria-hidden="true" />{reconnectingCount} reconnecting</span>}
+                </div>
                 <div className="roster-list">{Array.from({ length: lobby.matchSettings.teamSize }, (_, index) => {
                   const player = roster[index];
                   return <div className={`roster-slot ${player ? "occupied" : "empty"}`} key={player?.id ?? `${team.id}-${index}`}>
@@ -286,6 +292,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
                     {player?.isHost && <small className="role-badge host-badge">HOST</small>}
                     {player?.isCaptain && <small className="role-badge captain-badge">CAPTAIN</small>}
                     {player && !player.connected && <small className="offline-badge">RECONNECTING</small>}
+                    {player?.connected && <small className="online-badge">ONLINE</small>}
                     {player?.ready && <small className="ready-badge">READY ✓</small>}
                   </div>;
                 })}</div>

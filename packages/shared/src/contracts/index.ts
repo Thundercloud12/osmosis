@@ -94,12 +94,20 @@ export const playerSnapshotSchema = z.object({
   linkedPlayerId: z.string().min(1).max(64).optional(),
 });
 
+const teamPresenceSchema = z.object({
+  total: z.number().int().min(0).max(5),
+  online: z.number().int().min(0).max(5),
+  reconnecting: z.number().int().min(0).max(5),
+  offline: z.number().int().min(0).max(5),
+});
+
 export const roomSnapshotSchema = z.object({
   phase: z.enum(["PLAYING", "RESULTS"]),
   matchSettings: matchSettingsSchema,
   selfPlayerId: z.string().min(1).max(64),
   hostPlayerId: z.string().min(1).max(64).optional(),
   connectedPlayerCount: z.number().int().min(0).max(10),
+  teamPresence: z.object({ BLUE: teamPresenceSchema, RED: teamPresenceSchema }).optional(),
   serverTime: z.number().finite(),
   remainingSeconds: z.number().int().min(0).max(GAME_RULES.maximumMatchDurationSeconds),
   players: z.array(playerSnapshotSchema).max(10),

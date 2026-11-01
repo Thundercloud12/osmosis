@@ -29,6 +29,18 @@ export interface SnapshotProjectionInput {
   winnerOverride: TeamId | null;
 }
 
+function teamPresence(players: readonly ServerPlayer[], teamId: TeamId, now: number) {
+  const roster = players.filter((player) => player.teamId === teamId);
+  const online = roster.filter((player) => player.connected).length;
+  const reconnecting = roster.filter((player) => !player.connected && player.reconnectUntil !== undefined && player.reconnectUntil > now).length;
+  return {
+    total: roster.length,
+    online,
+    reconnecting,
+    offline: roster.length - online - reconnecting,
+  };
+}
+
 export function projectSnapshot(input: SnapshotProjectionInput): RoomSnapshot {
   const { self, players } = input;
   const blueScore = players.filter((player) => player.teamId === "BLUE").reduce((sum, player) => sum + player.points, 0);
@@ -107,6 +119,10 @@ export function projectSnapshot(input: SnapshotProjectionInput): RoomSnapshot {
     selfPlayerId: self.id,
     ...(input.hostPlayerId ? { hostPlayerId: input.hostPlayerId } : {}),
     connectedPlayerCount: input.connectedPlayerCount,
+    teamPresence: {
+      BLUE: teamPresence(players, "BLUE", input.now),
+      RED: teamPresence(players, "RED", input.now),
+    },
     serverTime: input.serverTime,
     remainingSeconds: input.remainingSeconds,
     players: playerSnapshots,
