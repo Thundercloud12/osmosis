@@ -337,9 +337,13 @@ export class ArenaRoom extends Room {
     const parsed = clientCommandSchema.safeParse(payload);
     if (!player || (player.status !== "ACTIVE" && player.status !== "INACTIVE") || !parsed.success || parsed.data.type !== "move") return;
     if (parsed.data.seq <= player.lastSequence) return;
-    if (player.pendingMoves.length >= 12) return;
     player.lastSequence = parsed.data.seq;
-    player.pendingMoves.push(parsed.data);
+    // Movement packets are snapshots of the currently held controls. If the
+    // network delivers several together, replaying every stale sample makes
+    // the authoritative player trail behind for up to 12 simulation ticks.
+    // Keep only the newest unsimulated input; the simulation still applies it
+    // on its next fixed tick.
+    player.pendingMoves.splice(0, player.pendingMoves.length, parsed.data);
   }
 
   private receiveCommand(client: Client, payload: unknown): void {

@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+dnf install -y docker python3 curl
+systemctl enable --now docker
+systemctl enable --now amazon-ssm-agent
+
+# Install cloudflared from Cloudflare's signed Amazon Linux repository.
+curl -fsSL https://pkg.cloudflare.com/cloudflared.repo \
+  -o /etc/yum.repos.d/cloudflared.repo
+dnf install -y cloudflared
+
+# Obtain the tunnel token through the EC2 role. The token is not embedded in
+# Terraform user data and is not printed to the boot log.
+tunnel_token=""
+for attempt in $(seq 1 30); do
+  tunnel_token="$(aws ssm get-parameter \
+    --name "${cloudflare_parameter_name}" \
+    --with-decryption \
+    --region "${aws_region}" \
+    --query 'Parameter.Value' \
+    --output text 2>/dev/null || true)"
+
+  if [ -n "$tunnel_token" ] && [ "$tunnel_token" != "None" ]; then
+    break
+  fi
+  sleep 10
+done
+
+if [ -z "$tunnel_token" ] || [ "$tunnel_token" = "None" ]; then
+  echo "Could not retrieve the Cloudflare Tunnel token from Parameter Store."
+  exit 1
+fi
+
+cloudflared service install "$tunnel_token"
+unset tunnel_token
+systemctl enable --now cloudflared

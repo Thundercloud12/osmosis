@@ -4,7 +4,8 @@ import type { ServerPlayer } from "../rooms/Player";
 export type PoleHolders = Record<TeamId, string | undefined>;
 
 export function applyQueuedMovement(player: ServerPlayer): void {
-  const input = player.pendingMoves.shift();
+  const input = player.pendingMoves.pop();
+  player.pendingMoves.length = 0;
   if (!input) return;
   player.dx = input.dx;
   player.dy = input.dy;

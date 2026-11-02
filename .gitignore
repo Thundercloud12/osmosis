@@ -8,6 +8,17 @@ coverage/
 .env.*
 !.env.example
 deploy/production.env
+
+# Terraform state and local inputs can contain infrastructure metadata/secrets.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+/deploy/terraform/terraform.tfvars
+*.tfplan
+*.plan
+crash.log
 .DS_Store
 
 # Local tooling and credentials
