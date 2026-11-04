@@ -36,7 +36,7 @@ const pages = [
   {
     chapter: "RAID AN HQ",
     title: "Hold your nerve.",
-    description: "Reach the opposing HQ and interact with E for three uninterrupted seconds. A completed raid adds 2,000 points to your own balance. Your crew can raid again after its 90-second cooldown.",
+    description: "Reach the opposing HQ while it is undefended and interact with E for three uninterrupted seconds. If any defender enters their base, the raid stops. A completed raid adds 2,000 points to your own balance. Your crew can raid again after its 90-second cooldown.",
     image: "/assets/tutorial/raid.png",
     alt: "A crewmate charging a raid at the enemy HQ in the live arena.",
     controls: [["E", "INTERACT"]],

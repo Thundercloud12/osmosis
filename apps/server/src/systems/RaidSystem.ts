@@ -6,29 +6,35 @@ export interface ActiveRaid { playerId: string; startedAt: number }
 export interface RaidResolution { stage: "INTERRUPTED" | "COMPLETED"; teamId: TeamId; playerId: string }
 export type ActiveRaids = Record<TeamId, ActiveRaid | undefined>;
 export type RaidCooldowns = Record<TeamId, number>;
+export type BaseOccupied = (teamId: TeamId) => boolean;
 
 export function setRaid(player: ServerPlayer, active: boolean, raids: ActiveRaids, cooldowns: RaidCooldowns,
-  now: number, isInsideBase: (player: ServerPlayer, team: TeamId) => boolean): void {
+  now: number, isInsideBase: (player: ServerPlayer, team: TeamId) => boolean,
+  isBaseOccupied: BaseOccupied): void {
   const raid = raids[player.teamId];
   if (!active) {
     if (raid?.playerId === player.id) raids[player.teamId] = undefined;
     return;
   }
   if (player.status !== "ACTIVE") throw new Error("Only active players can start a base raid.");
+  if (player.frozenUntil > now) throw new Error("You cannot start a raid while frozen.");
   if (raids[player.teamId]) throw new Error("Your crew already has an active raid.");
   if (now < cooldowns[player.teamId]) throw new Error("Your crew's raid is cooling down.");
   if (!isInsideBase(player, opponentTeam(player.teamId))) throw new Error("Move inside the enemy base to start a raid.");
+  if (isBaseOccupied(opponentTeam(player.teamId))) throw new Error("The enemy base is occupied; a raid cannot start.");
   raids[player.teamId] = { playerId: player.id, startedAt: now };
 }
 
 export function advanceRaids(raids: ActiveRaids, cooldowns: RaidCooldowns, now: number,
-  findById: (id: string) => ServerPlayer | undefined, isInsideBase: (player: ServerPlayer, team: TeamId) => boolean): RaidResolution[] {
+  findById: (id: string) => ServerPlayer | undefined, isInsideBase: (player: ServerPlayer, team: TeamId) => boolean,
+  isBaseOccupied: BaseOccupied): RaidResolution[] {
   const resolutions: RaidResolution[] = [];
   for (const teamId of ["BLUE", "RED"] as const) {
     const raid = raids[teamId];
     if (!raid) continue;
     const raider = findById(raid.playerId);
-    if (!raider || raider.status !== "ACTIVE" || !isInsideBase(raider, opponentTeam(teamId))) {
+    if (!raider || raider.status !== "ACTIVE" || raider.frozenUntil > now
+      || !isInsideBase(raider, opponentTeam(teamId)) || isBaseOccupied(opponentTeam(teamId))) {
       raids[teamId] = undefined;
       resolutions.push({ stage: "INTERRUPTED", teamId, playerId: raid.playerId });
       continue;

@@ -27,7 +27,6 @@ interface RemotePlayer {
   avatar: Phaser.GameObjects.Image;
   poleIndicator: Phaser.GameObjects.Text;
   positions: PositionBuffer;
-  walkPhase: number;
   status: "ACTIVE" | "INACTIVE" | "ELIMINATED" | "DISCONNECTED";
 }
 
@@ -82,7 +81,6 @@ export class ArenaScene extends Phaser.Scene {
   private readonly pickupSprites = new Map<string, Phaser.GameObjects.Container>();
   private readonly seenGameEventIds = new Set<string>();
   private readonly gameEventOrder: string[] = [];
-  private playerWalkPhase = 0;
   private currentSnapshot: RoomSnapshot | undefined;
   private selfTeamId: TeamId = "BLUE";
   private cameraFollowTarget: Phaser.GameObjects.GameObject | undefined;
@@ -213,7 +211,6 @@ export class ArenaScene extends Phaser.Scene {
     const dx = canMove ? (Number(this.cursors.right.isDown) - Number(this.cursors.left.isDown)) as -1 | 0 | 1 : 0;
     const dy = canMove ? (Number(this.cursors.down.isDown) - Number(this.cursors.up.isDown)) as -1 | 0 | 1 : 0;
     const direction = new Phaser.Math.Vector2(dx, dy).normalize();
-    const previousPlayerPosition = { x: this.player.x, y: this.player.y };
     if (canMove) {
       this.movement.advance(delta, { dx, dy }, (input) => {
         const sequence = this.network.sendMove(input.dx, input.dy);
@@ -247,19 +244,14 @@ export class ArenaScene extends Phaser.Scene {
     this.playerArt.setPosition(this.player.x, this.player.y);
     this.playerArt.setVisible(self?.status !== "ELIMINATED");
     this.playerLabel.setVisible(self?.status !== "ELIMINATED");
-    const playerDistance = Math.hypot(this.player.x - previousPlayerPosition.x, this.player.y - previousPlayerPosition.y);
-    const moving = Boolean(canMove) && direction.lengthSq() > 0 && playerDistance > 0.05;
-    if (moving) this.playerWalkPhase += playerDistance / 82 * Math.PI * 2;
-    this.crewmateRenderer.updateMovementPose(this.playerAvatar, time, this.playerWalkPhase, moving, direction.x);
+    const moving = Boolean(canMove) && direction.lengthSq() > 0;
+    this.playerAvatar.y = -8 + (moving ? Math.sin(time / 95) * 3 : Math.sin(time / 420) * 1.5);
+    this.playerAvatar.setAngle(moving ? direction.x * 5 : 0);
+    this.playerAvatar.setScale(moving ? 0.56 + Math.sin(time / 95) * 0.012 : 0.56);
     for (const remote of this.remotePlayers.values()) {
-      const previousPosition = { x: remote.root.x, y: remote.root.y };
       const interpolated = remote.positions.sample(performance.now());
       if (interpolated) remote.root.setPosition(interpolated.x, interpolated.y);
-      const deltaX = remote.root.x - previousPosition.x;
-      const distance = Math.hypot(deltaX, remote.root.y - previousPosition.y);
-      const remoteMoving = distance > 0.05;
-      if (remoteMoving) remote.walkPhase += distance / 82 * Math.PI * 2;
-      this.crewmateRenderer.updateMovementPose(remote.avatar, time, remote.walkPhase, remoteMoving, Math.sign(deltaX));
+      remote.avatar.y = -8 + Math.sin(time / 420 + remote.root.x / 120) * 1.5;
     }
     for (const [index, pickup] of [...this.pickupSprites.values()].entries()) {
       pickup.setScale(1 + Math.sin(time / 250 + index) * 0.08);
@@ -384,7 +376,7 @@ export class ArenaScene extends Phaser.Scene {
       const label = this.crewmateRenderer.createNameTag(player.nickname, player.teamId).setPosition(0, -45);
       const poleIndicator = art.getAt(4) as Phaser.GameObjects.Text;
       const root = this.add.container(player.x, player.y, [art, label]).setDepth(19);
-      remote = { root, avatar: art.getAt(2) as Phaser.GameObjects.Image, poleIndicator, positions: new PositionBuffer(), walkPhase: 0, status: player.status };
+      remote = { root, avatar: art.getAt(2) as Phaser.GameObjects.Image, poleIndicator, positions: new PositionBuffer(), status: player.status };
       this.remotePlayers.set(player.id, remote);
     }
     if (remote.status !== player.status) remote.positions.clear();

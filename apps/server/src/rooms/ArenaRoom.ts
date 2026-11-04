@@ -682,7 +682,8 @@ export class ArenaRoom extends Room {
   private setInteraction(player: ServerPlayer, active: boolean): void {
     const existing = this.activeRaids[player.teamId];
     setRaid(player, active, this.activeRaids, this.raidCooldownUntil, performance.now(),
-      (candidate, teamId) => this.isInsideBase(candidate, TEAM_BASES[teamId]));
+      (candidate, teamId) => this.isInsideBase(candidate, TEAM_BASES[teamId]),
+      (teamId) => this.hasDefenderInBase(teamId));
     const current = this.activeRaids[player.teamId];
     if (!existing && current?.playerId === player.id) this.emitRaidFeedback(player, "STARTED");
     if (!active && existing?.playerId === player.id && !current) this.emitRaidFeedback(player, "INTERRUPTED");
@@ -690,7 +691,8 @@ export class ArenaRoom extends Room {
 
   private advanceRaids(now: number): void {
     const resolutions = advanceRaidsSystem(this.activeRaids, this.raidCooldownUntil, now, (id) => this.findById(id),
-      (candidate, teamId) => this.isInsideBase(candidate, TEAM_BASES[teamId]));
+      (candidate, teamId) => this.isInsideBase(candidate, TEAM_BASES[teamId]),
+      (teamId) => this.hasDefenderInBase(teamId));
     for (const resolution of resolutions) {
       const raider = this.findById(resolution.playerId);
       if (raider) this.emitRaidFeedback(raider, resolution.stage);
@@ -884,6 +886,11 @@ export class ArenaRoom extends Room {
 
   private isInsideBase(player: ServerPlayer, base: { x: number; y: number; width: number; height: number }): boolean {
     return player.x >= base.x && player.x <= base.x + base.width && player.y >= base.y && player.y <= base.y + base.height;
+  }
+
+  private hasDefenderInBase(teamId: TeamId): boolean {
+    return [...this.players.values()].some((player) => player.teamId === teamId && player.connected
+      && player.status !== "ELIMINATED" && this.isInsideBase(player, TEAM_BASES[teamId]));
   }
 
   private findById(id: string): ServerPlayer | undefined { return [...this.players.values()].find((player) => player.id === id); }

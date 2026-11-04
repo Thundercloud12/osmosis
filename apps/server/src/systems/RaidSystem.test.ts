@@ -19,22 +19,22 @@ describe("base raids", () => {
     const cooldowns: RaidCooldowns = { BLUE: 0, RED: 0 };
     let insideEnemyBase = true;
     const isInside = (_candidate: ServerPlayer, team: "BLUE" | "RED") => team === "RED" && insideEnemyBase;
-    setRaid(raider, true, raids, cooldowns, 10_000, isInside);
-    expect(advanceRaids(raids, cooldowns, 12_999, () => raider, isInside)).toEqual([]);
+    setRaid(raider, true, raids, cooldowns, 10_000, isInside, () => false);
+    expect(advanceRaids(raids, cooldowns, 12_999, () => raider, isInside, () => false)).toEqual([]);
     expect(raider.points).toBe(100);
-    expect(advanceRaids(raids, cooldowns, 13_000, () => raider, isInside)).toEqual([
+    expect(advanceRaids(raids, cooldowns, 13_000, () => raider, isInside, () => false)).toEqual([
       { stage: "COMPLETED", teamId: "BLUE", playerId: "raider" },
     ]);
     expect(raider.points).toBe(100 + GAME_RULES.raidReward);
     expect(raider.raidsCompleted).toBe(1);
     expect(cooldowns.BLUE).toBe(13_000 + GAME_RULES.raidCooldownSeconds * 1_000);
-    expect(() => setRaid(raider, true, raids, cooldowns, 13_001, isInside)).toThrow("cooling down");
+    expect(() => setRaid(raider, true, raids, cooldowns, 13_001, isInside, () => false)).toThrow("cooling down");
 
     insideEnemyBase = true;
     cooldowns.BLUE = 0;
-    setRaid(raider, true, raids, cooldowns, 20_000, isInside);
+    setRaid(raider, true, raids, cooldowns, 20_000, isInside, () => false);
     insideEnemyBase = false;
-    expect(advanceRaids(raids, cooldowns, 20_100, () => raider, isInside)).toEqual([
+    expect(advanceRaids(raids, cooldowns, 20_100, () => raider, isInside, () => false)).toEqual([
       { stage: "INTERRUPTED", teamId: "BLUE", playerId: "raider" },
     ]);
     expect(raids.BLUE).toBeUndefined();
