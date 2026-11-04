@@ -17,6 +17,7 @@ import {
   roomSnapshotSchema,
   type LobbyPlayer,
   type MatchSettings,
+  type OpenRoomListing,
   type PlayerStatus,
   type GameEvent,
   type TeamId,
@@ -88,6 +89,8 @@ export class ArenaRoom extends Room {
   private readonly players = new Map<string, ServerPlayer>();
   private phase: RoomPhase = "LOBBY";
   private hostPlayerId: string | undefined;
+  private isPublic = false;
+  private publicOpenedAt = 0;
   private readonly captainIds: Record<TeamId, string | undefined> = { BLUE: undefined, RED: undefined };
   private readonly allocationLocked: Record<TeamId, boolean> = { BLUE: false, RED: false };
   private allocationComplete = false;
@@ -163,6 +166,9 @@ export class ArenaRoom extends Room {
     }
     if (this.phase !== "LOBBY") throw new ServerError(400, "This room is no longer accepting players.");
     if (this.players.size >= this.maxClients) throw new ServerError(400, "This room is full.");
+    if (isPublicRoomJoin(options) && !this.publicRoomListing()) {
+      throw new ServerError(403, "This room is no longer open to the public.");
+    }
     if (this.quickPlayConfig) {
       const claims = this.quickPlayClaims(client.sessionId, options);
       if (!claims) throw new ServerError(403, "This Quick Play seat is invalid or expired.");
@@ -278,6 +284,20 @@ export class ArenaRoom extends Room {
     }
   }
 
+  publicRoomListing(): OpenRoomListing | undefined {
+    const teamSize = this.matchSettings.teamSize;
+    if (!this.isPublic || this.phase !== "LOBBY" || this.quickPlayConfig || this.roomMode !== "STANDARD"
+      || (teamSize !== 4 && teamSize !== 5) || this.players.size >= this.maxClients) return undefined;
+    return {
+      roomCode: this.roomId,
+      roomMode: "STANDARD",
+      matchSettings: { ...this.matchSettings, teamSize },
+      playerCount: this.players.size,
+      maxPlayers: this.maxClients,
+      openedAt: this.publicOpenedAt,
+    };
+  }
+
   private quickPlayClaims(sessionId: string, options: unknown): QuickPlayHandoffClaims | undefined {
     if (!this.quickPlayConfig || typeof options !== "object" || options === null || !("quickPlayHandoff" in options)) return undefined;
     const claims = verifyHandoffCredential(options.quickPlayHandoff);
@@ -379,6 +399,7 @@ export class ArenaRoom extends Room {
       }
       switch (parsed.data.type) {
         case "chooseTeam": this.chooseTeam(player, parsed.data.teamId); break;
+        case "setRoomPublic": this.setRoomPublic(player, parsed.data.isPublic); break;
         case "captain": this.updateCaptain(player, parsed.data.action); break;
         case "beginAllocation": this.beginAllocation(player); break;
         case "allocate": this.allocatePoints(player, parsed.data.pointsByPlayerId); break;
@@ -449,9 +470,21 @@ export class ArenaRoom extends Room {
     }
     if (!this.captainIds.BLUE || !this.captainIds.RED) throw new Error("Choose one captain for each crew first.");
     this.phase = "ALLOCATION";
+    this.isPublic = false;
+    this.publicOpenedAt = 0;
     this.allocationLocked.BLUE = false;
     this.allocationLocked.RED = false;
     for (const teammate of this.players.values()) teammate.startingPoints = GAME_RULES.startingTeamPoints / this.playersPerTeam;
+  }
+
+  private setRoomPublic(player: ServerPlayer, isPublic: boolean): void {
+    if (player.id !== this.hostPlayerId) throw new Error("Only the host can open or close this room to the public.");
+    if (this.phase !== "LOBBY" || this.quickPlayConfig || this.roomMode !== "STANDARD") {
+      throw new Error("Only a standard private room in its pre-match lobby can be opened to the public.");
+    }
+    if (isPublic && this.players.size >= this.maxClients) throw new Error("This room is full and cannot be opened to new players.");
+    this.isPublic = isPublic;
+    this.publicOpenedAt = isPublic ? Date.now() : 0;
   }
 
   private allocatePoints(player: ServerPlayer, pointsByPlayerId: Record<string, number>): void {
@@ -873,6 +906,7 @@ export class ArenaRoom extends Room {
       client.send("lobbySnapshot", lobbySnapshotSchema.parse({
         roomCode: this.roomId, roomMode: this.roomMode, matchSettings: this.matchSettings, phase: this.phase, selfPlayerId: self.id, voiceCredential: this.voiceCredentialFor(self), voiceRoomName: `${this.roomId}:round-${this.roundNumber}:${self.teamId}`, hostPlayerId: this.hostPlayerId,
         teamSelectionLocked: Boolean(this.quickPlayConfig),
+        isPublic: this.isPublic,
         connectedPlayerCount, players,
         captainIds: { BLUE: this.captainIds.BLUE ?? null, RED: this.captainIds.RED ?? null },
         ownTeamAllocation: teammates.map((teammate) => ({ playerId: teammate.id, points: teammate.startingPoints ?? null })),
@@ -959,4 +993,9 @@ function parseQuickPlayRoomConfig(options: unknown): QuickPlayRoomConfig | undef
 
 function hasQuickPlayCredential(options: unknown): boolean {
   return typeof options === "object" && options !== null && "quickPlayHandoff" in options;
+}
+
+function isPublicRoomJoin(options: unknown): boolean {
+  return typeof options === "object" && options !== null && "publicRoomJoin" in options
+    && options.publicRoomJoin === true;
 }

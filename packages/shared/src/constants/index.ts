@@ -23,7 +23,10 @@ export const GAME_RULES = {
   maxLinkGroupSize: 2,
 } as const;
 
-export const QUICK_PLAY_DURATION_PRESETS_SECONDS = [300, 600, 900, 1_200] as const;
+export const QUICK_PLAY_SETTINGS = {
+  teamSize: GAME_RULES.teamSize,
+  matchDurationSeconds: GAME_RULES.matchDurationSeconds,
+} as const;
 
 export const MOVEMENT_CONFIG = {
   speed: 260,

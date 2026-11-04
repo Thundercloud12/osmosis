@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { VoiceChannelSession, type VoiceChannel } from "./VoiceChannelSession";
+import { readVoicePanelCollapsed, writeVoicePanelCollapsed } from "./voicePanelPreference";
 
 type Props = {
   roomCode: string;
@@ -13,6 +14,30 @@ type Props = {
 type Sessions = Partial<Record<VoiceChannel, VoiceChannelSession>>;
 type VoiceRetry = { kind: "team" } | { kind: "global"; listen: boolean } | { kind: "microphone" };
 type VoiceError = { message: string; retry: VoiceRetry | null };
+
+function getInitialCollapsedState(): boolean {
+  if (typeof window === "undefined") return false;
+  const narrowViewport = typeof window.matchMedia === "function" && window.matchMedia("(max-width: 700px)").matches;
+  try {
+    return readVoicePanelCollapsed(window.localStorage, narrowViewport);
+  } catch {
+    return narrowViewport;
+  }
+}
+
+function describeMicrophoneError(error: unknown): string {
+  const name = error instanceof Error ? error.name : "";
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    return "Microphone access is blocked. Allow microphone access in this site’s browser permissions, then retry.";
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return "No microphone was found. Connect a microphone and try again.";
+  }
+  if (name === "NotReadableError" || name === "TrackStartError") {
+    return "Your microphone is busy in another app. Close that app and try again.";
+  }
+  return error instanceof Error ? error.message : "Could not access your microphone. Check browser permissions and try again.";
+}
 
 export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connected, inMatch = false, teamId }: Props) {
   const sessionsRef = useRef<Sessions>({});
@@ -34,6 +59,17 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
   const [teamBusy, setTeamBusy] = useState(false);
   const [globalBusy, setGlobalBusy] = useState(false);
   const [voiceError, setVoiceError] = useState<VoiceError | null>(null);
+  const [collapsed, setCollapsed] = useState(getInitialCollapsedState);
+
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    try {
+      writeVoicePanelCollapsed(window.localStorage, next);
+    } catch {
+      writeVoicePanelCollapsed(undefined, next);
+    }
+  };
 
   const reportError = useCallback((message: string, retry: VoiceRetry | null = null) => {
     setVoiceError({ message, retry });
@@ -246,7 +282,7 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
     } catch (micError) {
       micEnabledRef.current = false;
       setMicEnabled(false);
-      reportError(micError instanceof Error ? micError.message : "Microphone permission was denied.", enabled ? { kind: "microphone" } : null);
+      reportError(describeMicrophoneError(micError), enabled ? { kind: "microphone" } : null);
     }
   };
 
@@ -311,70 +347,93 @@ export function VoiceControls({ roomCode, voiceCredential, voiceRoomName, connec
   };
 
   const remoteSpeaking = teamSpeaking || (globalListen && globalSpeaking);
-  const voiceStatus = remoteSpeaking
-    ? "CREWMATE SPEAKING"
-    : !connected
-      ? "GAME RECONNECTING"
-      : teamJoined || globalConnected
-        ? "VOICE CONNECTED"
-        : "VOICE NOT CONNECTED";
+  const microphoneUnavailable = voiceError?.retry?.kind === "microphone";
+  const voiceConnecting = (teamBusy && !teamJoined) || (globalBusy && !globalConnected);
+  const voiceStatus = !connected
+    ? "GAME RECONNECTING"
+    : microphoneUnavailable
+      ? "MICROPHONE UNAVAILABLE"
+      : voiceConnecting
+        ? "CONNECTING TO VOICE"
+        : remoteSpeaking
+          ? "CREWMATE SPEAKING"
+          : teamJoined || globalConnected
+            ? "VOICE CONNECTED"
+            : "VOICE NOT CONNECTED";
+  const listeningSummary = teamJoined && globalListen
+    ? "Team + Global"
+    : teamJoined
+      ? "Team voice"
+      : globalListen
+        ? "Global voice"
+        : globalConnected && talkTarget === "GLOBAL"
+          ? "Mic → Global"
+          : "Voice Chat";
+  const hasVoiceSession = teamJoined || globalConnected;
+  const voiceStateClass = !connected ? "is-reconnecting" : microphoneUnavailable ? "has-error" : voiceConnecting ? "is-connecting" : hasVoiceSession ? "is-connected" : "is-disconnected";
 
-  return <aside className={`voice-dock ${inMatch ? "is-match" : ""} ${teamId === "RED" ? "voice-red" : ""}`} aria-label="Voice controls">
-    <header className="voice-dock-header">
-      <span className={`voice-dot ${remoteSpeaking ? "is-speaking" : ""}`} aria-hidden="true" />
-      <strong>VOICE</strong>
-      <span className="voice-overall-status" role="status" aria-live="polite">{voiceStatus}</span>
-    </header>
+  return <aside className={`voice-dock ${inMatch ? "is-match" : ""} ${teamId === "RED" ? "voice-red" : ""} ${collapsed ? "is-collapsed" : ""}`} aria-label="Voice controls">
+    {collapsed ? <div className="voice-collapsed-content">
+      <svg className="voice-headphones-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13v-1a8 8 0 0 1 16 0v1" /><rect x="3" y="12" width="4" height="8" rx="2" /><rect x="17" y="12" width="4" height="8" rx="2" /></svg>
+      <span className="voice-collapsed-copy"><strong>{listeningSummary}</strong><small><i className={`voice-dot ${voiceStateClass} ${remoteSpeaking ? "is-speaking" : ""}`} aria-hidden="true" />{voiceStatus}</small></span>
+      <span className={`voice-mic-indicator ${micEnabled ? "is-live" : "is-muted"}`} aria-label={micEnabled ? "Microphone on" : "Microphone muted"}>{micEnabled ? "MIC ON" : "MIC OFF"}</span>
+      <button className="voice-expand-button" onClick={toggleCollapsed} aria-label="Expand voice controls" aria-expanded="false">⌃</button>
+    </div> : <>
+      <header className="voice-dock-header">
+        <span className={`voice-dot ${voiceStateClass} ${remoteSpeaking ? "is-speaking" : ""}`} aria-hidden="true" />
+        <strong>VOICE</strong>
+        <span className="voice-overall-status" role="status" aria-live="polite">{voiceStatus}</span>
+        <button className="voice-collapse-button" onClick={toggleCollapsed} aria-label="Collapse voice controls" aria-expanded="true">⌄</button>
+      </header>
 
-    <section className="voice-control-section" aria-label="Listening channels">
-      <h2>LISTEN</h2>
-      <div className="voice-listen-actions">
-        {teamJoined
-          ? <span className="voice-channel-connected"><span>Team voice</span><strong>Joined</strong></span>
-          : <button className="voice-channel-button" disabled={!connected || teamBusy} onClick={() => void joinTeamVoice()}>
-            {teamBusy ? "Connecting to Team…" : "Join Team voice"}
+      <section className="voice-primary-section" aria-label="Voice actions">
+        <div className="voice-listening-summary"><span>LISTENING</span><strong>{listeningSummary}</strong>{remoteSpeaking && <small className="speaking-label">Crewmate speaking</small>}</div>
+        <div className="voice-primary-actions">
+          {!teamJoined && <button className="voice-join-button" disabled={!connected || teamBusy} onClick={() => void joinTeamVoice()}>
+            {teamBusy ? "Connecting…" : "Join Team voice"}
           </button>}
-        <button className="voice-channel-button" disabled={!connected || globalBusy} onClick={() => void setGlobalListening(!globalListen)} aria-pressed={globalListen}>
-          <span>Listen to Global</span><strong>{globalBusy ? "Connecting…" : globalListen ? "On" : "Off"}</strong>
-        </button>
-      </div>
-    </section>
-
-    <section className="voice-control-section" aria-label="Microphone controls">
-      <h2>MIC SENDS TO</h2>
-      <div className="voice-transmit-row">
-        <div className="voice-destination" role="group" aria-label="Microphone destination">
-          <button className={talkTarget === "TEAM" ? "is-selected" : ""} aria-pressed={talkTarget === "TEAM"} disabled={!connected || globalBusy} onClick={() => void selectTalkTarget("TEAM")}>Team</button>
-          <button className={talkTarget === "GLOBAL" ? "is-selected" : ""} aria-pressed={talkTarget === "GLOBAL"} disabled={!connected || globalBusy} onClick={() => void selectTalkTarget("GLOBAL")}>Global</button>
+          {canTransmit && <button className={`voice-mic-button ${micEnabled ? "voice-active" : ""}`} disabled={teamBusy || globalBusy || microphoneUnavailable} onClick={() => void setTargetMicEnabled(!micEnabled)} aria-pressed={micEnabled}>
+            {micEnabled ? "Mute microphone" : "Turn mic on"}
+          </button>}
+          {hasVoiceSession && <>
+            <button className={`voice-utility-button ${deafened ? "voice-active" : ""}`} onClick={toggleDeafened} aria-pressed={deafened} aria-label={deafened ? "Undeafen audio" : "Deafen audio"}>{deafened ? "Undeafen" : "Deafen"}</button>
+            <button className="voice-leave" disabled={teamBusy || globalBusy} onClick={() => void leaveVoice()}>Leave voice</button>
+          </>}
         </div>
-        <button className={`voice-mic-button ${micEnabled ? "voice-active" : ""}`} disabled={!canTransmit || teamBusy || globalBusy} onClick={() => void setTargetMicEnabled(!micEnabled)} aria-pressed={micEnabled}>
-          {micEnabled ? "Mute microphone" : "Enable microphone"}
-        </button>
-      </div>
-      <p className="voice-mic-hint">
-        {!connected
-          ? "Reconnect to the game to use voice."
-          : talkTarget === "TEAM" && !teamJoined
-            ? "Join Team voice above to send your mic to your crew."
-            : talkTarget === "GLOBAL" && !globalConnected
-              ? "Connecting to Global voice before your mic can send."
-              : micEnabled
-                ? `Your microphone is live on ${talkTarget === "TEAM" ? "Team" : "Global"}. Press V or the button to mute.`
-                : `Your microphone is muted. Enable it to talk on ${talkTarget === "TEAM" ? "Team" : "Global"}. Press V to toggle.`}
-      </p>
-    </section>
+        <p className="voice-mic-hint" role="status" aria-live="polite">
+          {!connected ? "Reconnect to the game to use voice."
+            : microphoneUnavailable ? "Microphone access needs attention. Check the message below and retry."
+              : micEnabled ? `Your microphone is live on ${talkTarget === "TEAM" ? "Team" : "Global"}. Press V to mute.`
+                : canTransmit ? `Your microphone is muted. Turn it on to talk on ${talkTarget === "TEAM" ? "Team" : "Global"}.`
+                  : "Join Team voice to hear and talk with your crew."}
+        </p>
+      </section>
 
-    {(teamJoined || globalConnected) && <div className="voice-utility-actions">
-      <button className={`voice-utility-button ${deafened ? "voice-active" : ""}`} onClick={toggleDeafened} aria-pressed={deafened}>
-        {deafened ? "Audio deafened" : "Deafen audio"}
-      </button>
-      <button className="voice-leave" disabled={teamBusy || globalBusy} onClick={() => void leaveVoice()}>Leave voice</button>
-    </div>}
+      <details className="voice-advanced-settings">
+        <summary>Channel options</summary>
+        <div className="voice-advanced-content">
+          <div className="voice-channel-settings">
+            <span>Global voice</span>
+            <button className="voice-global-toggle" disabled={!connected || globalBusy} onClick={() => void setGlobalListening(!globalListen)} aria-pressed={globalListen}>
+              {globalBusy ? "Connecting…" : globalListen ? "Listening" : "Listen to Global"}
+            </button>
+          </div>
+          <div className="voice-channel-settings">
+            <span>Microphone sends to</span>
+            <div className="voice-destination" role="group" aria-label="Microphone destination">
+              <button className={talkTarget === "TEAM" ? "is-selected" : ""} aria-pressed={talkTarget === "TEAM"} disabled={!connected || globalBusy} onClick={() => void selectTalkTarget("TEAM")}>Team</button>
+              <button className={talkTarget === "GLOBAL" ? "is-selected" : ""} aria-pressed={talkTarget === "GLOBAL"} disabled={!connected || globalBusy} onClick={() => void selectTalkTarget("GLOBAL")}>Global</button>
+            </div>
+          </div>
+          <p className="voice-mic-hint">Only one channel receives your microphone at a time.</p>
+        </div>
+      </details>
 
-    {voiceError && <div className="voice-error" role="alert">
-      <p><strong>Voice connection issue</strong><span>{voiceError.message}</span></p>
-      {voiceError.retry && <button className="voice-retry" disabled={!connected || teamBusy || globalBusy} onClick={() => void retryVoice()}>Retry</button>}
-      <button className="voice-dismiss" aria-label="Dismiss voice error" onClick={clearError}>×</button>
-    </div>}
+      {voiceError && <div className="voice-error" role="alert">
+        <p><strong>{microphoneUnavailable ? "Microphone unavailable" : "Voice connection issue"}</strong><span>{voiceError.message}</span></p>
+        {voiceError.retry && <button className="voice-retry" disabled={!connected || teamBusy || globalBusy} onClick={() => void retryVoice()}>Retry</button>}
+        <button className="voice-dismiss" aria-label="Dismiss voice error" onClick={clearError}>×</button>
+      </div>}
+    </>}
   </aside>;
 }

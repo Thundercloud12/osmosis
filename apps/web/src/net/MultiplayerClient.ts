@@ -4,6 +4,7 @@ import {
   lobbySnapshotSchema,
   gameEventSchema,
   roomSnapshotSchema,
+  openRoomsSnapshotSchema,
   type GameCommand,
   type GameEvent,
   type LobbyCommand,
@@ -13,7 +14,7 @@ import {
   type RoomMode,
   type MatchmakingCommand,
   type MatchmakingSnapshot,
-  type QuickPlaySettings,
+  type OpenRoomListing,
 } from "@osmosis/shared";
 import { dispatchSnapshotListeners, type SnapshotListener } from "./snapshotDispatch";
 import { clearReconnectToken, readReconnectToken, saveReconnectToken } from "./ReconnectTokenStorage";
@@ -26,6 +27,17 @@ export type NetworkStatus = {
   latencyMs?: number;
   pingTimedOut?: boolean;
 };
+
+function gameServerUrl(): string {
+  return import.meta.env.VITE_GAME_SERVER_URL || "http://localhost:2567";
+}
+
+function httpGameServerUrl(): URL {
+  const url = new URL(gameServerUrl());
+  if (url.protocol === "ws:") url.protocol = "http:";
+  else if (url.protocol === "wss:") url.protocol = "https:";
+  return url;
+}
 
 export class MultiplayerClient {
   private room: Room | undefined;
@@ -105,9 +117,9 @@ export class MultiplayerClient {
     await this.connectRoom((client) => client.create("arena", { nickname, roomMode, ...(matchSettings ? { matchSettings } : {}) }));
   }
 
-  async createParty(nickname: string, settings: QuickPlaySettings): Promise<void> {
+  async createParty(nickname: string): Promise<void> {
     await this.connectMatchmaking(nickname);
-    this.sendMatchmakingCommand({ type: "createParty", settings });
+    this.sendMatchmakingCommand({ type: "createParty" });
   }
 
   async joinParty(nickname: string, code: string): Promise<void> {
@@ -115,16 +127,29 @@ export class MultiplayerClient {
     this.sendMatchmakingCommand({ type: "joinParty", code: code.toUpperCase() });
   }
 
-  async queueSolo(nickname: string, settings: QuickPlaySettings): Promise<void> {
+  async queueSolo(nickname: string): Promise<void> {
     await this.connectMatchmaking(nickname);
-    this.sendMatchmakingCommand({ type: "queueSolo", settings });
+    this.sendMatchmakingCommand({ type: "queueSolo" });
+  }
+
+  async listOpenRooms(signal?: AbortSignal): Promise<OpenRoomListing[]> {
+    const response = await fetch(new URL("/rooms/open", httpGameServerUrl()), {
+      cache: "no-store",
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) throw new Error(response.status === 429
+      ? "Room list is refreshing too quickly. Wait a moment and retry."
+      : "Could not load open rooms. Try again shortly.");
+    const parsed = openRoomsSnapshotSchema.safeParse(await response.json());
+    if (!parsed.success) throw new Error("The open room list returned an invalid response.");
+    return parsed.data.rooms;
   }
 
   async resumeMatchmaking(): Promise<boolean> {
     const saved = readMatchmakingResume();
     if (!saved || this.matchmakingRoom) return Boolean(this.matchmakingRoom);
     this.disposed = false;
-    const client = new Client(import.meta.env.VITE_GAME_SERVER_URL || "http://localhost:2567");
+    const client = new Client(gameServerUrl());
     this.setStatus({ state: "connecting", connectedPlayerCount: 0 });
     try {
       const room = await client.reconnect(saved.token);
@@ -171,13 +196,18 @@ export class MultiplayerClient {
     }, code);
   }
 
+  async joinOpenRoom(roomCode: string, nickname: string): Promise<void> {
+    const code = roomCode.toUpperCase();
+    await this.connectRoom((client) => client.joinById(code, { nickname, publicRoomJoin: true }), code);
+  }
+
   private async connectRoom(join: (client: Client) => Promise<Room>, roomCode?: string): Promise<void> {
     this.disposed = false;
     this.stopLatencyMonitor();
     this.resetLatency();
     const generation = ++this.connectionGeneration;
     this.setStatus({ state: "connecting", connectedPlayerCount: 0 });
-    const client = new Client(import.meta.env.VITE_GAME_SERVER_URL || "http://localhost:2567");
+    const client = new Client(gameServerUrl());
     let room: Room;
     try {
       room = await join(client);
@@ -297,7 +327,7 @@ export class MultiplayerClient {
     this.disposed = false;
     const generation = ++this.connectionGeneration;
     this.setStatus({ state: "connecting", connectedPlayerCount: 0 });
-    const client = new Client(import.meta.env.VITE_GAME_SERVER_URL || "http://localhost:2567");
+    const client = new Client(gameServerUrl());
     const saved = readMatchmakingResume();
     let room: Room;
     try {

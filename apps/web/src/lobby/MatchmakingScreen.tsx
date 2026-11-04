@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import type { MatchmakingCommand, MatchmakingSnapshot, QuickPlaySettings } from "@osmosis/shared";
+import type { MatchmakingCommand, MatchmakingSnapshot } from "@osmosis/shared";
 
 interface MatchmakingScreenProps {
   snapshot: MatchmakingSnapshot | null;
@@ -8,8 +8,6 @@ interface MatchmakingScreenProps {
   onCommand: (command: MatchmakingCommand) => void;
   onLeave: () => void;
 }
-
-const durations = [300, 600, 900, 1_200] as const;
 
 export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: MatchmakingScreenProps) {
   const [copied, setCopied] = useState(false);
@@ -29,11 +27,6 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
     window.setTimeout(() => setCopied(false), 1_500);
   }
 
-  function updateSettings(change: Partial<QuickPlaySettings>): void {
-    if (!party) return;
-    onCommand({ type: "updatePartySettings", settings: { ...party.settings, ...change } });
-  }
-
   return <main className="lobby-shell">
     <header className="lobby-header">
       <a className="lobby-brand" href="/" onClick={(event) => { event.preventDefault(); onLeave(); }}>
@@ -49,7 +42,7 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
         {party && <>
           <div className="invite-strip"><span>YOUR CREW INVITE CODE</span><strong>{party.code}</strong><button className="copy-button" onClick={() => void copyInvite()}>{copied ? "COPIED! ✓" : "COPY INVITE ↗"}</button><span className="player-count">{party.members.length}/{party.settings.teamSize} CREW</span></div>
           <section className="matchmaking-party-card">
-            <header className="team-card-heading"><span className="team-emblem"><img src="/assets/characters/astronaut.png" alt="" /></span><div><p>THESE CREWMATES STAY TOGETHER</p><h2>Open spots fill with players in Quick Play</h2></div><strong>{party.members.length}/{party.settings.teamSize}</strong></header>
+            <header className="team-card-heading"><span className="team-emblem"><img src="/assets/characters/astronaut.png" alt="" /></span><div><p>THESE CREWMATES STAY TOGETHER</p><h2>Queue as one crew</h2></div><strong>{party.members.length}/{party.settings.teamSize}</strong></header>
             <div className="team-presence-summary" role="group" aria-label={`${partyOnlineCount} of ${party.settings.teamSize} party players online${partyReconnectingCount ? `, ${partyReconnectingCount} reconnecting` : ""}`}>
               <span className="presence-online"><i aria-hidden="true" />{partyOnlineCount}/{party.settings.teamSize} online</span>
               {partyReconnectingCount > 0 && <span className="presence-reconnecting"><i aria-hidden="true" />{partyReconnectingCount} reconnecting</span>}
@@ -64,17 +57,8 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
                 {member?.connected && <small className="online-badge">ONLINE</small>}
               </div>;
             })}</div>
-            <div className="matchmaking-settings">
-              <label className="field-label" htmlFor="party-size">TEAM SIZE</label>
-              <select id="party-size" className="lobby-input" value={party.settings.teamSize} disabled={!isLeader || Boolean(queue)} onChange={(event) => updateSettings({ teamSize: Number(event.target.value) as 4 | 5 })}>
-                <option value={4}>4 versus 4</option><option value={5}>5 versus 5</option>
-              </select>
-              <label className="field-label" htmlFor="party-duration">MATCH LENGTH</label>
-              <select id="party-duration" className="lobby-input" value={party.settings.matchDurationSeconds} disabled={!isLeader || Boolean(queue)} onChange={(event) => updateSettings({ matchDurationSeconds: Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"] })}>
-                {durations.map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
-              </select>
-            </div>
-            <p className="matchmaking-party-note">Quick Play pairs compatible teams and match lengths. Your party will never be split.</p>
+            <div className="matchmaking-fixed-settings"><span>QUICK PLAY</span><strong>{party.settings.teamSize}v{party.settings.teamSize} · {party.settings.matchDurationSeconds / 60} MINUTES</strong></div>
+            <p className="matchmaking-party-note">Your party stays together. We assign the oldest eligible crews and players first.</p>
             {isLeader && !queue && <button className="play-button compact-button" disabled={party.members.some((member) => !member.connected)} onClick={() => onCommand({ type: "queueParty" })}>QUEUE WITH MY CREW <span>→</span></button>}
             {!isLeader && !queue && <p className="requirement-note">The crew leader will start Quick Play.</p>}
           </section>
@@ -83,10 +67,11 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
         {queue && <section className="welcome-card queue-status-card">
           <div className="card-tab">{queue.status === "MATCH_FOUND" ? "MATCH FOUND · ENTERING AIRLOCK" : party ? "YOUR CREW IS IN THE QUEUE" : "YOU’RE IN THE QUEUE"}</div>
           {queue.status === "SEARCHING" ? <>
-            {queue.isPaused ? <div className="queue-paused-note">SEARCH PAUSED WHILE A CREWMATE RECONNECTS</div> : <div className="queue-progress"><strong>{Math.max(0, queue.settings.teamSize * 2 - queue.playersNeeded)}/{queue.settings.teamSize * 2}</strong><span>players found for a compatible match</span></div>}
-            <p>{queue.isPaused ? "Your crew is held together for up to 120 seconds." : `Searching for ${queue.settings.teamSize}v${queue.settings.teamSize} · ${queue.settings.matchDurationSeconds / 60} minutes`}</p>
+            {queue.isPaused ? <div className="queue-paused-note">SEARCH PAUSED WHILE A CREWMATE RECONNECTS</div> : <div className="queue-progress"><strong>{queue.estimatedPlayersWaiting}</strong><span>players waiting in Quick Play</span></div>}
+            <p>{queue.isPaused ? "Your crew is held together for up to 120 seconds." : queue.playersNeeded > 0 ? `Waiting for ${queue.playersNeeded} more player${queue.playersNeeded === 1 ? "" : "s"} to fill the next match.` : "Enough players are queued. Arranging complete teams now."}</p>
+            {!queue.isPaused && <p>Shared queue · {queue.settings.teamSize}v{queue.settings.teamSize} · {queue.settings.matchDurationSeconds / 60} minutes</p>}
             <p className="queue-wait">Waiting {Math.floor(queue.waitSeconds / 60)}:{String(queue.waitSeconds % 60).padStart(2, "0")}</p>
-            <p className="matchmaking-party-note">The match begins when two complete teams are ready. Your crew’s open spots can be filled by solo players or another party.</p>
+            <p className="matchmaking-party-note">Your crew stays together while the oldest eligible players are placed into complete teams.</p>
           </> : <p className="matchmaking-party-note">Your team assignments are reserved. Connecting everyone to the existing lobby…</p>}
           <button className="quiet-button queue-cancel-button" onClick={() => onCommand({ type: "cancelQueue" })}>CANCEL SEARCH</button>
         </section>}

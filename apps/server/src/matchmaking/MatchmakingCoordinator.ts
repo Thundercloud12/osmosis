@@ -1,6 +1,6 @@
 import { randomBytes, randomInt, randomUUID } from "node:crypto";
 
-import type { MatchmakingSnapshot, QuickPlaySettings } from "@osmosis/shared";
+import { QUICK_PLAY_SETTINGS, type MatchmakingSnapshot, type QuickPlaySettings } from "@osmosis/shared";
 import { composeMatch, type QueueGroup } from "./TeamComposer";
 
 export interface MatchmakingPlayer {
@@ -24,6 +24,7 @@ export interface PartyRecord {
 export interface QueueTicket extends QueueGroup<MatchmakingPlayer> {
   partyCode?: string;
   settings: QuickPlaySettings;
+  queueOrder: number;
   status: "QUEUED" | "FORMING" | "HANDOFF";
   handoffId: string | undefined;
 }
@@ -53,6 +54,7 @@ export class MatchmakingCoordinator {
   private readonly partiesByCode = new Map<string, PartyRecord>();
   private readonly tickets = new Map<string, QueueTicket>();
   private readonly handoffs = new Map<string, MatchHandoff>();
+  private nextQueueOrder = 0;
 
   registerPlayer(sessionId: string, nickname: string): MatchmakingPlayer {
     const player: MatchmakingPlayer = {
@@ -74,14 +76,13 @@ export class MatchmakingCoordinator {
     return player;
   }
 
-  createParty(playerId: string, settings: QuickPlaySettings, now = Date.now()): PartyRecord {
+  createParty(playerId: string, now = Date.now()): PartyRecord {
     const player = this.requireAvailablePlayer(playerId);
     if (player.partyCode) throw new Error("Leave your current crew before creating another party.");
-    this.assertSettingsFit(settings, [player]);
     const code = this.createPartyCode();
     const party: PartyRecord = {
       id: randomUUID(), code, leaderId: playerId, memberIds: [playerId],
-      settings, createdAt: now,
+      settings: QUICK_PLAY_SETTINGS, createdAt: now,
     };
     this.partiesByCode.set(code, party);
     player.partyCode = code;
@@ -100,15 +101,6 @@ export class MatchmakingCoordinator {
     return party;
   }
 
-  updatePartySettings(playerId: string, settings: QuickPlaySettings): PartyRecord {
-    const party = this.requirePartyFor(playerId);
-    if (party.leaderId !== playerId) throw new Error("Only the crew leader can change Quick Play settings.");
-    if (party.memberIds.length > settings.teamSize) throw new Error("Your crew is larger than that team size.");
-    if (this.partyTicket(party.code)) throw new Error("Cancel the queue before changing crew settings.");
-    party.settings = settings;
-    return party;
-  }
-
   leaveParty(playerId: string): MatchmakingRemoval {
     const player = this.requirePlayer(playerId);
     if (player.queueTicketId) throw new Error("Cancel Quick Play before leaving your crew.");
@@ -121,10 +113,10 @@ export class MatchmakingCoordinator {
     return { affectedPlayerIds: [playerId] };
   }
 
-  queueSolo(playerId: string, settings: QuickPlaySettings, now = Date.now()): QueueTicket {
+  queueSolo(playerId: string, now = Date.now()): QueueTicket {
     const player = this.requireAvailablePlayer(playerId);
     if (player.partyCode) throw new Error("Leave your crew before queuing solo.");
-    return this.createTicket([player], undefined, settings, now);
+    return this.createTicket([player], undefined, now);
   }
 
   queueParty(playerId: string, now = Date.now()): QueueTicket {
@@ -133,7 +125,7 @@ export class MatchmakingCoordinator {
     if (this.partyTicket(party.code)) throw new Error("Your crew is already in Quick Play.");
     const members = party.memberIds.map((memberId) => this.requirePlayer(memberId));
     if (members.some((member) => !member.connected)) throw new Error("Everyone in your crew must reconnect before queuing.");
-    return this.createTicket(members, party.code, party.settings, now);
+    return this.createTicket(members, party.code, now);
   }
 
   cancelQueue(playerId: string): MatchmakingRemoval {
@@ -174,25 +166,18 @@ export class MatchmakingCoordinator {
   }
 
   nextMatch(): { settings: QuickPlaySettings; blue: QueueTicket[]; red: QueueTicket[]; handoffId: string } | undefined {
-    const keys = new Set([...this.tickets.values()]
+    const eligible = [...this.tickets.values()]
       .filter((ticket) => ticket.status === "QUEUED" && ticket.members.every((member) => member.connected))
-      .map((ticket) => settingsKey(ticket.settings)));
-    for (const key of keys) {
-      const eligible = [...this.tickets.values()]
-        .filter((ticket) => ticket.status === "QUEUED" && ticket.members.every((member) => member.connected) && settingsKey(ticket.settings) === key);
-      const settings = eligible[0]?.settings;
-      if (!settings) continue;
-      const composition = composeMatch(eligible, settings.teamSize);
-      if (!composition) continue;
-      const selected = [...composition.blue, ...composition.red];
-      const handoffId = randomBytes(16).toString("base64url");
-      for (const ticket of selected) {
-        ticket.status = "FORMING";
-        ticket.handoffId = handoffId;
-      }
-      return { settings, blue: composition.blue, red: composition.red, handoffId };
+      .sort((left, right) => left.queueOrder - right.queueOrder || left.createdAt - right.createdAt);
+    const composition = composeMatch(eligible, QUICK_PLAY_SETTINGS.teamSize);
+    if (!composition) return undefined;
+    const selected = [...composition.blue, ...composition.red];
+    const handoffId = randomBytes(16).toString("base64url");
+    for (const ticket of selected) {
+      ticket.status = "FORMING";
+      ticket.handoffId = handoffId;
     }
-    return undefined;
+    return { settings: QUICK_PLAY_SETTINGS, blue: composition.blue, red: composition.red, handoffId };
   }
 
   releaseFormation(handoffId: string): string[] {
@@ -305,8 +290,7 @@ export class MatchmakingCoordinator {
     const waitingPlayers = ticket?.status === "QUEUED"
       ? [...this.tickets.values()]
         .filter((candidate) => candidate.status === "QUEUED"
-          && candidate.members.every((member) => member.connected)
-          && sameSettings(candidate.settings, ticket.settings))
+          && candidate.members.every((member) => member.connected))
         .reduce((sum, candidate) => sum + candidate.members.length, 0)
       : 0;
     return {
@@ -351,11 +335,12 @@ export class MatchmakingCoordinator {
 
   getHandoff(handoffId: string): MatchHandoff | undefined { return this.handoffs.get(handoffId); }
 
-  private createTicket(members: MatchmakingPlayer[], partyCode: string | undefined, settings: QuickPlaySettings, now: number): QueueTicket {
-    this.assertSettingsFit(settings, members);
+  private createTicket(members: MatchmakingPlayer[], partyCode: string | undefined, now: number): QueueTicket {
+    if (members.length > QUICK_PLAY_SETTINGS.teamSize) throw new Error("Your crew is larger than the Quick Play team size.");
     if (members.some((member) => member.queueTicketId)) throw new Error("Someone in your crew is already queued.");
     const ticket: QueueTicket = {
-      id: randomUUID(), createdAt: now, members, settings, status: "QUEUED", handoffId: undefined,
+      id: randomUUID(), createdAt: now, queueOrder: this.nextQueueOrder++, members,
+      settings: QUICK_PLAY_SETTINGS, status: "QUEUED", handoffId: undefined,
       ...(partyCode ? { partyCode } : {}),
     };
     this.tickets.set(ticket.id, ticket);
@@ -404,22 +389,10 @@ export class MatchmakingCoordinator {
     });
   }
 
-  private assertSettingsFit(settings: QuickPlaySettings, members: MatchmakingPlayer[]): void {
-    if (members.length > settings.teamSize) throw new Error("Your crew is larger than the selected team size.");
-  }
-
   private createPartyCode(): string {
     for (;;) {
       const code = Array.from({ length: 6 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");
       if (!this.partiesByCode.has(code)) return code;
     }
   }
-}
-
-function settingsKey(settings: QuickPlaySettings): string {
-  return `${settings.teamSize}:${settings.matchDurationSeconds}`;
-}
-
-function sameSettings(left: QuickPlaySettings, right: QuickPlaySettings): boolean {
-  return settingsKey(left) === settingsKey(right);
 }

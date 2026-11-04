@@ -64,6 +64,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("lockAllocation") }),
   z.object({ type: z.literal("startCountdown") }),
   z.object({ type: z.literal("cancelCountdown") }),
+  z.object({ type: z.literal("setRoomPublic"), isPublic: z.boolean() }).strict(),
 ]);
 
 export type ClientCommand = z.infer<typeof clientCommandSchema>;
@@ -192,6 +193,7 @@ export const lobbySnapshotSchema = z.object({
   voiceCredential: z.string().min(20).max(2_048),
   voiceRoomName: z.string().min(1).max(128),
   hostPlayerId: z.string().min(1).max(64),
+  isPublic: z.boolean().default(false),
   teamSelectionLocked: z.boolean(),
   connectedPlayerCount: z.number().int().min(0).max(10),
   players: z.array(lobbyPlayerSchema).max(10),
@@ -212,19 +214,39 @@ export type LobbyPlayer = z.infer<typeof lobbyPlayerSchema>;
 export type LobbySnapshot = z.infer<typeof lobbySnapshotSchema>;
 export type LobbyCommand = Extract<
   ClientCommand,
-  { type: "chooseTeam" | "captain" | "beginAllocation" | "ready" | "allocate" | "lockAllocation" | "startCountdown" | "cancelCountdown" }
+  { type: "chooseTeam" | "captain" | "beginAllocation" | "ready" | "allocate" | "lockAllocation" | "startCountdown" | "cancelCountdown" | "setRoomPublic" }
 >;
 export type GameCommand = Extract<ClientCommand, { type: "interact" | "linkStart" | "linkStop" | "ping" | "reportPlayer" | "rematch" }>;
 
+export const openRoomListingSchema = z.object({
+  roomCode: z.string().length(6).regex(/^[A-Z2-9]+$/),
+  roomMode: z.literal("STANDARD"),
+  matchSettings: matchSettingsSchema.extend({ teamSize: z.union([z.literal(4), z.literal(5)]) }),
+  playerCount: z.number().int().min(0).max(10),
+  maxPlayers: z.number().int().min(1).max(10),
+  openedAt: z.number().int().nonnegative(),
+}).strict();
+export const openRoomsSnapshotSchema = z.object({
+  rooms: z.array(openRoomListingSchema).max(100),
+}).strict();
+export type OpenRoomListing = z.infer<typeof openRoomListingSchema>;
+export type OpenRoomsSnapshot = z.infer<typeof openRoomsSnapshotSchema>;
+
+// The payload stays broad for rolling deploy compatibility; the server uses QUICK_PLAY_SETTINGS.
 export const quickPlayTeamSizeSchema = z.union([z.literal(4), z.literal(5)]);
 export const quickPlayDurationSchema = z.union([
-  z.literal(300), z.literal(600), z.literal(900), z.literal(1200),
+  z.literal(300), z.literal(600), z.literal(900), z.literal(1_200),
 ]);
 export const quickPlaySettingsSchema = z.object({
   teamSize: quickPlayTeamSizeSchema,
   matchDurationSeconds: quickPlayDurationSchema,
 }).strict();
 export type QuickPlaySettings = z.infer<typeof quickPlaySettingsSchema>;
+
+const legacyQuickPlaySettingsSchema = z.object({
+  teamSize: z.union([z.literal(4), z.literal(5)]),
+  matchDurationSeconds: z.union([z.literal(300), z.literal(600), z.literal(900), z.literal(1_200)]),
+}).strict();
 
 export const matchmakingPartySnapshotSchema = z.object({
   code: z.string().length(6).regex(/^[A-Z2-9]+$/),
@@ -254,11 +276,11 @@ export const matchmakingSnapshotSchema = z.object({
 export type MatchmakingSnapshot = z.infer<typeof matchmakingSnapshotSchema>;
 
 export const matchmakingCommandSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("createParty"), settings: quickPlaySettingsSchema }).strict(),
+  z.object({ type: z.literal("createParty"), settings: legacyQuickPlaySettingsSchema.optional() }).strict(),
   z.object({ type: z.literal("joinParty"), code: z.string().length(6).regex(/^[A-Z2-9]+$/) }).strict(),
   z.object({ type: z.literal("leaveParty") }).strict(),
-  z.object({ type: z.literal("updatePartySettings"), settings: quickPlaySettingsSchema }).strict(),
-  z.object({ type: z.literal("queueSolo"), settings: quickPlaySettingsSchema }).strict(),
+  z.object({ type: z.literal("updatePartySettings"), settings: legacyQuickPlaySettingsSchema }).strict(),
+  z.object({ type: z.literal("queueSolo"), settings: legacyQuickPlaySettingsSchema.optional() }).strict(),
   z.object({ type: z.literal("queueParty") }).strict(),
   z.object({ type: z.literal("cancelQueue") }).strict(),
 ]);
