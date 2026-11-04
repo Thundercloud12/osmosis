@@ -1,37 +1,37 @@
 #!/bin/bash
 set -euo pipefail
 
-dnf install -y docker python3 curl
+dnf install -y docker python3
 systemctl enable --now docker
 systemctl enable --now amazon-ssm-agent
 
-# Install cloudflared from Cloudflare's signed Amazon Linux repository.
-curl -fsSL https://pkg.cloudflare.com/cloudflared.repo \
-  -o /etc/yum.repos.d/cloudflared.repo
-dnf install -y cloudflared
+# Serve the public WSS hostname directly from EC2. Caddy terminates TLS and
+# forwards requests to the Colyseus port, which Compose binds to localhost.
+install -d -m 0755 /etc/osmosis /var/lib/osmosis-caddy/data /var/lib/osmosis-caddy/config
+cat > /etc/osmosis/Caddyfile <<'CADDYFILE'
+${game_hostname} {
+  reverse_proxy 127.0.0.1:2567
+}
+CADDYFILE
 
-# Obtain the tunnel token through the EC2 role. The token is not embedded in
-# Terraform user data and is not printed to the boot log.
-tunnel_token=""
-for attempt in $(seq 1 30); do
-  tunnel_token="$(aws ssm get-parameter \
-    --name "${cloudflare_parameter_name}" \
-    --with-decryption \
-    --region "${aws_region}" \
-    --query 'Parameter.Value' \
-    --output text 2>/dev/null || true)"
+docker pull caddy:2
+cat > /etc/systemd/system/osmosis-caddy.service <<'UNIT'
+[Unit]
+Description=Osmosis Caddy HTTPS and WebSocket reverse proxy
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
 
-  if [ -n "$tunnel_token" ] && [ "$tunnel_token" != "None" ]; then
-    break
-  fi
-  sleep 10
-done
+[Service]
+Restart=always
+RestartSec=5
+ExecStartPre=-/usr/bin/docker rm -f osmosis-caddy
+ExecStart=/usr/bin/docker run --rm --name osmosis-caddy --network host -v /etc/osmosis/Caddyfile:/etc/caddy/Caddyfile:ro -v /var/lib/osmosis-caddy/data:/data -v /var/lib/osmosis-caddy/config:/config caddy:2
+ExecStop=/usr/bin/docker stop --time 10 osmosis-caddy
+TimeoutStopSec=20
 
-if [ -z "$tunnel_token" ] || [ "$tunnel_token" = "None" ]; then
-  echo "Could not retrieve the Cloudflare Tunnel token from Parameter Store."
-  exit 1
-fi
-
-cloudflared service install "$tunnel_token"
-unset tunnel_token
-systemctl enable --now cloudflared
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now osmosis-caddy

@@ -10,6 +10,12 @@ variable "availability_zone" {
   default     = "ap-south-1b"
 }
 
+variable "game_hostname" {
+  description = "Production DNS-only hostname used by Caddy for direct WSS traffic to EC2."
+  type        = string
+  default     = "osmosis-backend.keerthanpoojary.tech"
+}
+
 variable "github_actions_subject" {
   description = "GitHub OIDC subject allowed to assume the deploy role. This matches the subject observed on the previous AWS role."
   type        = string
@@ -51,12 +57,6 @@ variable "reconnect_secret" {
 
 variable "metrics_token" {
   description = "Bearer token used to protect the metrics endpoint."
-  type        = string
-  sensitive   = true
-}
-
-variable "cloudflare_tunnel_token" {
-  description = "Token for the existing Cloudflare Tunnel; it is stored in SecureString and fetched by EC2 during bootstrap."
   type        = string
   sensitive   = true
 }

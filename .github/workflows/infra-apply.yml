@@ -1,0 +1,94 @@
+name: Apply production Terraform plan
+
+on:
+  workflow_dispatch:
+    inputs:
+      plan_run_id:
+        description: Run ID of the reviewed, successful Terraform plan on main (valid for one day)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osmosis-terraform-production
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION }}
+      TF_VAR_subnet_id: ${{ vars.AWS_SUBNET_ID }}
+      TF_VAR_game_domain: ${{ vars.GAME_DOMAIN }}
+      TF_VAR_cloudflare_zone_id: ${{ vars.CLOUDFLARE_ZONE_ID }}
+      PLAN_RUN_ID: ${{ inputs.plan_run_id }}
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+
+      - name: Confirm the selected plan is from the current main commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$PLAN_RUN_ID" =~ ^[0-9]+$ ]]
+          current_sha="$(git rev-parse HEAD)"
+          run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${PLAN_RUN_ID}")"
+          jq -e --arg sha "$current_sha" \
+            '.head_branch == "main" and .head_sha == $sha and (.event == "push" or .event == "workflow_dispatch") and .status == "completed" and .conclusion == "success" and (.path | contains("infra.yml"))' \
+            <<< "$run_json" >/dev/null
+          echo "Verified successful plan for current main commit $current_sha."
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.11.4
+
+      - name: Assume Terraform apply role through GitHub OIDC
+        id: aws_credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_TF_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: osmosis-terraform-apply-${{ github.run_id }}
+
+      - name: Download the exact saved plan from private S3
+        run: |
+          set -euo pipefail
+          plan_prefix="s3://osmosis-tfstate-sexy2223/production/plans/${PLAN_RUN_ID}"
+          mkdir -p "$RUNNER_TEMP/terraform-plan"
+          aws s3 cp "$plan_prefix/tfplan" "$RUNNER_TEMP/terraform-plan/tfplan" --only-show-errors
+          aws s3 cp "$plan_prefix/plan.commit" "$RUNNER_TEMP/terraform-plan/plan.commit" --only-show-errors
+          test "$(cat "$RUNNER_TEMP/terraform-plan/plan.commit")" = "$(git rev-parse HEAD)"
+          test -s "$RUNNER_TEMP/terraform-plan/tfplan"
+
+      - name: Apply the exact reviewed plan
+        run: |
+          terraform -chdir=infra init -input=false
+          terraform -chdir=infra apply -input=false -no-color "$RUNNER_TEMP/terraform-plan/tfplan"
+
+      - name: Remove the local saved plan
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/terraform-plan"
+
+      - name: Delete applied plan objects from the active S3 version
+        if: success()
+        run: |
+          set -euo pipefail
+          for key in tfplan plan.commit terraform-plan.txt; do
+            aws s3api delete-object \
+              --bucket osmosis-tfstate-sexy2223 \
+              --key "production/plans/${PLAN_RUN_ID}/${key}" >/dev/null
+          done

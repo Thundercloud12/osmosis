@@ -1,0 +1,10 @@
+aws_region     = "ap-south-1"
+subnet_id      = "subnet-0fbd118cb7d4e59e4"
+instance_type  = "t3.medium"
+game_domain    = "keerthanpoojary.tech"
+
+# Obtain this ID from the Cloudflare zone dashboard or API; never guess it.
+cloudflare_zone_id = "REPLACE_WITH_ZONE_ID"
+
+# This references the existing bootstrap policy; Terraform does not create it.
+runtime_permissions_boundary_arn = "arn:aws:iam::066523631927:policy/osmosis-ec2-permissions-boundary"

@@ -8,6 +8,21 @@ output "ec2_instance_id" {
   value       = aws_instance.game_server.id
 }
 
+output "game_server_public_ip" {
+  description = "Elastic IP for the production DNS-only backend A record."
+  value       = aws_eip.game_server.public_ip
+}
+
+output "game_server_hostname" {
+  description = "Production DNS-only hostname served by Caddy for secure WebSocket connections."
+  value       = var.game_hostname
+}
+
+output "game_server_url" {
+  description = "Production VITE_GAME_SERVER_URL base URL; Colyseus upgrades to WSS."
+  value       = "https://${var.game_hostname}"
+}
+
 output "ecr_repository_uri" {
   description = "ECR image repository URI."
   value       = aws_ecr_repository.game_server.repository_url

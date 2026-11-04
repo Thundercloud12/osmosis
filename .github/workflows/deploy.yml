@@ -1,0 +1,173 @@
+name: CI and EC2 deployment
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/server/**"
+      - "packages/**"
+      - "Dockerfile"
+      - "deploy/compose.production.yaml"
+      - "deploy/deploy-on-ec2.sh"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - ".github/workflows/deploy.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "Dockerfile"
+      - "deploy/compose.production.yaml"
+      - "deploy/deploy-on-ec2.sh"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "tsconfig.base.json"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      rollback_image_tag:
+        description: Optional existing immutable ECR image tag to roll back to; leave empty to build main
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osmosis-production-deploy
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.12.0
+
+      - name: Activate pinned pnpm
+        run: corepack enable && corepack prepare pnpm@10.33.2 --activate
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Build workspace
+        run: pnpm build
+
+  deploy:
+    needs: checks
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.EC2_INSTANCE_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Assume the dedicated application deployment role through OIDC
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: osmosis-app-deploy-${{ github.run_id }}
+
+      - name: Authenticate to ECR
+        id: ecr
+        run: |
+          set -euo pipefail
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          aws ecr get-login-password --region "$AWS_REGION" \
+            | docker login --username AWS --password-stdin "$registry"
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push immutable image
+        id: image
+        if: github.event_name == 'push' || inputs.rollback_image_tag == ''
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          image="${ECR_REGISTRY}/osmosis:${IMAGE_TAG}"
+          docker build --platform linux/amd64 --target server --tag "$image" .
+          docker push "$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Select existing immutable image for rollback
+        id: rollback
+        if: github.event_name == 'workflow_dispatch' && inputs.rollback_image_tag != ''
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ROLLBACK_IMAGE_TAG: ${{ inputs.rollback_image_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$ROLLBACK_IMAGE_TAG" =~ ^[A-Za-z0-9_.-]{1,128}$ ]]
+          echo "image=${ECR_REGISTRY}/osmosis:${ROLLBACK_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy image on EC2 through Systems Manager
+        env:
+          EC2_INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
+          GAME_DOMAIN: ${{ vars.GAME_DOMAIN }}
+          GAME_SERVER_IMAGE: ${{ steps.image.outputs.image || steps.rollback.outputs.image }}
+        run: |
+          set -euo pipefail
+          test -n "$EC2_INSTANCE_ID"
+          test -n "$GAME_SERVER_IMAGE"
+          test -n "$GAME_DOMAIN"
+          printf -v remote_command '/opt/osmosis/deploy/deploy-on-ec2.sh %q %q' \
+            "$GAME_SERVER_IMAGE" "$AWS_REGION"
+          jq -n --arg command "$remote_command" \
+            '{commands: [$command], executionTimeout: ["1800"]}' \
+            > "$RUNNER_TEMP/ssm-parameters.json"
+          command_id="$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "Osmosis application deployment $GITHUB_SHA" \
+            --parameters "file://$RUNNER_TEMP/ssm-parameters.json" \
+            --query 'Command.CommandId' --output text)"
+          echo "SSM deployment command started: $command_id"
+
+          for attempt in $(seq 1 360); do
+            status="$(aws ssm get-command-invocation \
+              --command-id "$command_id" --instance-id "$EC2_INSTANCE_ID" \
+              --query Status --output text 2>/dev/null || true)"
+            case "$status" in
+              Success)
+                echo "SSM deployment completed successfully."
+                break
+                ;;
+              Failed|TimedOut|DeliveryTimedOut|ExecutionTimedOut|Cancelled|Cancelling|Undeliverable|Terminated|InvalidPlatform|AccessDenied)
+                echo "SSM deployment failed: $status" >&2
+                aws ssm get-command-invocation \
+                  --command-id "$command_id" --instance-id "$EC2_INSTANCE_ID" \
+                  --query StandardErrorContent --output text || true
+                exit 1
+                ;;
+            esac
+            sleep 5
+          done
+          [[ "$status" == "Success" ]]
+
+          curl --fail --silent --show-error --connect-timeout 5 --max-time 15 \
+            --retry 10 --retry-all-errors --retry-delay 5 \
+            "https://game.${GAME_DOMAIN}/health"

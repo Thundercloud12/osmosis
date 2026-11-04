@@ -32,7 +32,7 @@
         "ecr:PutImage",
         "ecr:UploadLayerPart"
       ],
-      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/osmosis/game-server"
+      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/osmosis"
     }
   ]
 }
