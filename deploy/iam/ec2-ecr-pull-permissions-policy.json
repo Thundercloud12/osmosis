@@ -15,7 +15,7 @@
         "ecr:BatchGetImage",
         "ecr:GetDownloadUrlForLayer"
       ],
-      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/osmosis/game-server"
+      "Resource": "arn:aws:ecr:REGION:ACCOUNT_ID:repository/osmosis"
     },
     {
       "Sid": "ReadOsmosisProductionParameters",

@@ -8,10 +8,11 @@ livekit_api_key         = "replace-with-livekit-api-key"
 livekit_api_secret      = "replace-with-livekit-api-secret"
 reconnect_secret        = "replace-with-reconnect-secret"
 metrics_token           = "replace-with-metrics-token"
-cloudflare_tunnel_token = "paste-token-from-existing-cloudflare-tunnel"
-
 # Increment when rotating the SecureString parameter values.
 secure_parameter_version = 1
 
 # The default is ap-south-1b; t3.small is available in ap-south-1a/b/c.
 # availability_zone = "ap-south-1b"
+
+# The sole production backend hostname. Cloudflare DNS must be DNS-only.
+game_hostname = "osmosis-backend.keerthanpoojary.tech"

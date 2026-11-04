@@ -15,7 +15,7 @@
 | Source of truth | Colyseus server owns simulation, positions, collisions, LOS, score, clock, link state, pole ownership, elimination and results |
 | Voice | LiveKit client SDK/WebRTC, private audio room per team plus one optional Global room per match round; channel tokens minted **server-side** |
 | Persistence | None for v1; matches, parties and queues in memory; ephemeral signed reconnect tokens |
-| Hosting | One Node.js game server + static web app; initial EC2 deployment uses Cloudflare Pages and a named Cloudflare Tunnel; optional separately hosted/self-hosted LiveKit |
+| Hosting | One Node.js game server on EC2 + static web app on Cloudflare; backend traffic goes directly to EC2 through Caddy; optional separately hosted/self-hosted LiveKit |
 | Matchmaking | Single-process in-memory party/queue coordinator; queue keys are team size and duration; no external broker or persistence |
 | Workspace | pnpm monorepo with shared TypeScript domain/contracts |
 | Browser playtests | Sibling `osmosis-stresstester` project; unit and room integration tests stay with the game source |
@@ -262,18 +262,17 @@ The 1v1 and 2v2 room modes are temporary test-only options. The client exposes t
 ## 11. Deployment and observability
 
 ```text
-Player browser --HTTPS--> Cloudflare Pages (static web build)
-Player browser --HTTPS/WSS--> Cloudflare edge --> named Tunnel
-                                      --> cloudflared on EC2
-                                      --> one Node.js/Colyseus process:2567
+Player browser --HTTPS--> Cloudflare static frontend
+Player browser --WSS--> DNS-only backend hostname --> EC2 Elastic IP :443
+                                                   --> Caddy --> Colyseus :2567
 Player browser --WebRTC/WSS--> LiveKit service (ICE/TURN as required)
 Game server --signed, scoped voice token--> browser
 ```
 
 - Single Node instance is **intentional** for v1; room state, party membership and matchmaking queues remain in one process. A restart ends matches and clears queues. Horizontal scaling requires a separate architecture decision for shared room/queue coordination.
-- The production Compose definition is `deploy/compose.production.yaml`. It runs only the Node server and publishes port 2567 on EC2 loopback (`127.0.0.1:2567`). The separately managed `cloudflared` systemd service forwards the named tunnel's public hostname `game.<domain>` to `http://localhost:2567`; the Cloudflare token is not passed to the game container. Host the static web build separately, with `VITE_GAME_SERVER_URL=https://game.<domain>` baked in and `CLIENT_ORIGINS` set to the exact web origin. The named tunnel is only the public network path; it does not make the in-memory game server highly available or preserve rooms through restarts.
-- EC2 accepts SSH only from the administrator's IP. Player HTTP and WebSocket traffic reaches the app through the tunnel's outbound connector; browser voice signaling/media connects directly to LiveKit. Do not route WebRTC media through the game server or Cloudflare Tunnel.
-- `.github/workflows/deploy-ec2.yml` runs typecheck, tests and builds on pull requests and server/shared/production-infrastructure pushes to `main`; only successful `main` pushes deploy. The server image is built on a GitHub-hosted runner, pushed to ECR with the commit SHA tag, then pulled by EC2 through Systems Manager Run Command. Frontend-only changes publish through Pages without restarting the game server. The deploy job uses GitHub OIDC to assume a narrowly scoped AWS role, so GitHub runner IPs do not need SSH access and long-lived AWS keys are not stored in GitHub. See `docs/DEPLOYMENT.md` for IAM setup.
+- The production Compose definition is `deploy/compose.production.yaml`. It runs only the Node server and publishes port 2567 on EC2 loopback (`127.0.0.1:2567`). Caddy terminates HTTPS/WSS on the instance and proxies to that port. The production backend hostname is `game.keerthanpoojary.tech`, configured as a DNS-only A record to the EC2 Elastic IP. Set `VITE_GAME_SERVER_URL=https://game.keerthanpoojary.tech` in the frontend production build; the Colyseus client upgrades room connections to WSS. Set `CLIENT_ORIGINS` to the exact frontend origin. The backend does not use `cloudflared` or a Cloudflare-proxied hostname.
+- EC2 accepts public HTTPS and HTTP for the direct web endpoint, but not SSH or port 2567; use Systems Manager for administration. DNS-only backend traffic bypasses Cloudflare's HTTP proxy protections, so the origin IP is public. Browser voice signaling/media connects directly to LiveKit. Do not route WebRTC media through the game server.
+- `.github/workflows/deploy.yml` runs typecheck, tests and builds on pull requests and relevant `main` pushes. It pushes immutable server images to ECR and asks EC2 to pull and run them through Systems Manager. Frontend-only pushes continue through the existing Cloudflare static frontend without restarting the game server. GitHub OIDC assumes a dedicated application deployment role; no SSH key or AWS access key is stored in GitHub. Terraform lives in the single production root `infra/`, with validation/plan in `.github/workflows/infra.yml` and manually approved saved-plan apply in `.github/workflows/infra-apply.yml`. See `infra/README.md` for setup.
 - The in-memory matchmaking coordinator groups parties without splitting them and forms two exact teams at the configured team size. Queue keys include team size and one of the documented Quick Play duration presets. Disconnected queue members pause eligibility during the 120-second reconnect grace; after the grace expires the affected queue ticket is removed. Handoff reserves all seats in one ordinary ArenaRoom, keeps the queue connection until the client joins and stores its Arena reconnect token, and expires an incomplete lobby handoff after 120 seconds. Allocation, readiness and gameplay remain ArenaRoom's responsibility. Abuse reports are validated and rate-limited by ArenaRoom and emitted as structured JSON to server stdout; no persistence or moderation service is introduced. Do not add a database, Redis, broker or matchmaking service for this single-instance launch.
 - Environment keys: client game URL, server CORS origin, LiveKit URL, LiveKit API key/secret, token signer secret, and `ENABLE_QUICK_PLAY`; env example is committed, real secrets are not. Quick Play is enabled automatically outside production and remains disabled in production unless explicitly set to `true`.
 - Log room creation, join/leave/reconnect, phase transitions, battle/raid aggregate counts and exceptions; do not log audio, raw voice tokens or sensitive credentials.

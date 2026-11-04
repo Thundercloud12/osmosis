@@ -61,11 +61,10 @@ locals {
   }
 
   secure_parameter_values = {
-    CLOUDFLARE_TUNNEL_TOKEN = var.cloudflare_tunnel_token
-    LIVEKIT_API_KEY         = var.livekit_api_key
-    LIVEKIT_API_SECRET      = var.livekit_api_secret
-    METRICS_TOKEN           = var.metrics_token
-    RECONNECT_SECRET        = var.reconnect_secret
+    LIVEKIT_API_KEY    = var.livekit_api_key
+    LIVEKIT_API_SECRET = var.livekit_api_secret
+    METRICS_TOKEN      = var.metrics_token
+    RECONNECT_SECRET   = var.reconnect_secret
   }
 }
 
@@ -113,7 +112,6 @@ resource "aws_ssm_parameter" "string" {
 resource "aws_ssm_parameter" "secure" {
   # Keep the instance keys independent of sensitive input values.
   for_each = toset([
-    "CLOUDFLARE_TUNNEL_TOKEN",
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
     "METRICS_TOKEN",
@@ -232,12 +230,27 @@ resource "aws_iam_instance_profile" "ec2_runtime" {
 }
 
 resource "aws_security_group" "game_server" {
-  name        = "osmosis-prod-sg"
-  description = "Osmosis production EC2; all public traffic arrives through Cloudflare Tunnel."
+  name        = "osmosis-prod-direct-sg"
+  description = "Osmosis production EC2; public game traffic uses direct HTTPS through Caddy."
   vpc_id      = data.aws_vpc.default.id
 
-  # Intentionally no ingress rules. cloudflared establishes outbound tunnel
-  # connections; the game port remains bound to host localhost by Compose.
+  ingress {
+    description = "HTTPS and secure WebSockets through Caddy"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "HTTP for Caddy redirects and ACME HTTP-01 validation"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Colyseus remains bound to host localhost by Compose. Do not expose 2567.
   egress {
     from_port   = 0
     to_port     = 0
@@ -245,7 +258,12 @@ resource "aws_security_group" "game_server" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = merge(local.common_tags, { Name = "osmosis-prod-sg" })
+  # Create the replacement before detaching a legacy group to avoid a gap.
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  tags = merge(local.common_tags, { Name = "osmosis-prod-direct-sg" })
 }
 
 resource "aws_instance" "game_server" {
@@ -256,8 +274,7 @@ resource "aws_instance" "game_server" {
   associate_public_ip_address = true
   iam_instance_profile        = aws_iam_instance_profile.ec2_runtime.name
   user_data = templatefile("${path.module}/bootstrap.sh.tftpl", {
-    aws_region                = var.aws_region
-    cloudflare_parameter_name = "/osmosis/prod/CLOUDFLARE_TUNNEL_TOKEN"
+    game_hostname = var.game_hostname
   })
 
   root_block_device {
@@ -270,10 +287,20 @@ resource "aws_instance" "game_server" {
   depends_on = [
     aws_iam_role_policy_attachment.ec2_runtime,
     aws_iam_role_policy_attachment.ec2_ssm_core,
-    aws_ssm_parameter.secure["CLOUDFLARE_TUNNEL_TOKEN"],
   ]
 
   tags = merge(local.common_tags, { Name = "osmosis-prod-server" })
+}
+
+resource "aws_eip" "game_server" {
+  domain = "vpc"
+
+  tags = merge(local.common_tags, { Name = "osmosis-prod-game-eip" })
+}
+
+resource "aws_eip_association" "game_server" {
+  allocation_id = aws_eip.game_server.id
+  instance_id   = aws_instance.game_server.id
 }
 
 resource "aws_iam_role" "github_deploy" {
