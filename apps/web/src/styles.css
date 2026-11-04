@@ -476,3 +476,157 @@ canvas {
   .matchmaking-party-card .roster-list { grid-template-columns:1fr; }
   .matchmaking-layout { margin-top:20px; }
 }
+
+/* Pre-match lobby hierarchy and compact voice dock. */
+.lobby-header .room-chip { gap:8px; padding:8px 12px; border:1px solid #ffffff80; border-radius:99px; background:#ffffff24; color:#f8fff1; font-size:9px; font-weight:1000; letter-spacing:.1em; }
+.room-heading { align-items:center; }
+.room-heading-copy { min-width:0; }
+.room-context { display:flex; flex-wrap:wrap; gap:5px 12px; margin:6px 0 0; color:#faffed; font-size:11px; font-weight:800; text-shadow:0 1px 2px #38767c; }
+.room-context span { opacity:.82; }
+.lobby-room-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px; }
+.room-invite-chip { display:flex; align-items:center; gap:10px; min-height:44px; padding:5px 7px 5px 12px; border:2px solid #fff8e5; border-radius:99px; background:#fff9e8; box-shadow:0 4px 0 #397c8030; }
+.room-invite-chip>span { color:#7b9992; font-size:8px; font-weight:1000; letter-spacing:.1em; }
+.room-invite-chip>strong { color:#315d68; font-size:15px; letter-spacing:.17em; }
+.room-invite-chip .copy-button { min-height:34px; padding:7px 10px; }
+.lobby-steps { display:flex; align-items:center; gap:8px; margin:0 0 14px; padding:0; list-style:none; }
+.lobby-steps li { display:flex; align-items:center; gap:7px; min-height:30px; padding:5px 10px; border:1px solid #ffffff80; border-radius:99px; background:#ffffff26; color:#effcf0; font-size:9px; font-weight:900; letter-spacing:.03em; }
+.lobby-steps li>span { display:grid; place-items:center; width:18px; height:18px; border-radius:50%; background:#ffffff40; font-size:8px; }
+.lobby-steps li.is-current { border-color:#fff7df; background:#fff9e8; color:#315d68; box-shadow:0 3px 0 #397c8030; }
+.lobby-steps li.is-current>span { background:#f0bd69; color:#654e2b; }
+.lobby-steps li.is-complete { color:#e9fff1; }
+.team-card { min-width:0; transition:border-color .18s,box-shadow .18s; }
+.team-card.is-your-crew { border-color:#ffce75; box-shadow:0 0 0 2px #ffce7560,0 6px 0 #397c8030,0 16px 28px #326c6c20; }
+.team-card-heading,.team-heading-copy { min-width:0; }
+.team-heading-copy h2 { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.your-crew-label { margin-left:auto; padding:5px 7px; border-radius:99px; background:#ffedc5; color:#916b35; font-size:7px; font-weight:1000; letter-spacing:.08em; white-space:nowrap; }
+.team-card-heading .crew-count { margin-left:auto; }
+.team-card-heading .your-crew-label+.crew-count { margin-left:0; }
+.team-presence-summary { min-height:30px; margin-top:-4px; }
+.team-presence-summary .presence-ready { color:#428666; }
+.roster-list { margin:0; padding:0; list-style:none; }
+.roster-slot { min-width:0; }
+.roster-slot.occupied { transition:background-color .16s,transform .16s; }
+.roster-slot.is-local-player { background:#fffdf3; box-shadow:inset 0 0 0 1px #e9bf70; }
+.crew-player-info { display:grid; flex:1; min-width:0; gap:2px; }
+.crew-player-meta { display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; color:#829c98; font-size:8px; font-weight:800; line-height:1.15; }
+.local-player-label { color:#bd8050; font-weight:1000; }
+.ready-label { color:#428666; }
+.roster-connection { display:inline-flex; flex:none; align-items:center; gap:5px; color:#738d87; font-size:8px; font-weight:800; white-space:nowrap; }
+.roster-connection i { width:7px; height:7px; border-radius:50%; background:#6eb58c; }
+.roster-connection.is-reconnecting { color:#a87938; }
+.roster-connection.is-reconnecting i { background:#d5aa5d; }
+.roster-slot.empty { min-height:38px; }
+.team-action { min-height:40px; margin-top:9px; }
+.control-card { align-items:start; }
+.control-copy { align-self:center; }
+.control-copy>p:not(.mini-label):not(.lobby-error) { margin:7px 0 0; }
+.control-actions { min-width:0; }
+.allocation-list { max-height:200px; gap:6px; padding:2px 3px; }
+.allocation-row { grid-template-columns:minmax(0,1fr) 36px 74px 36px; gap:8px; min-height:38px; padding:2px 4px; border-radius:11px; background:#ffffff8c; }
+.allocation-player { min-width:0; }
+.allocation-player>span:last-child { display:grid; min-width:0; gap:2px; overflow:hidden; text-overflow:ellipsis; }
+.allocation-player small { color:#8b9e97; font-size:7px; font-weight:1000; letter-spacing:.08em; }
+.allocation-row strong { padding-right:4px; }
+.stepper { width:40px; min-height:40px; border:1px solid #d8e8dc; border-radius:11px; font-size:20px; }
+.stepper:focus-visible,.team-action:focus-visible,.copy-button:focus-visible,.quiet-button:focus-visible,.play-button:focus-visible,.ready-button:focus-visible { outline:3px solid #315d68; outline-offset:3px; }
+.allocation-summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; padding:9px 10px; border:1px solid #e5e9d7; border-radius:13px; background:#f5f4e7; }
+.allocation-summary>div { display:grid; gap:3px; min-width:0; }
+.allocation-summary span { color:#819691; font-size:7px; font-weight:1000; letter-spacing:.06em; text-transform:uppercase; }
+.allocation-summary strong { color:#315d68; font-size:13px; font-variant-numeric:tabular-nums; }
+.allocation-summary .has-allocation-error strong { color:#b8434c; }
+.allocation-lock-confirm { display:grid; gap:8px; padding:10px; border:1px solid #e6c789; border-radius:14px; background:#fff5dc; }
+.allocation-lock-confirm p { margin:0; color:#86663a; font-size:10px; font-weight:800; line-height:1.4; }
+.allocation-lock-confirm>div { display:flex; justify-content:flex-end; gap:8px; }
+.allocation-lock-confirm .quiet-button { min-height:38px; padding:7px 11px; color:#6f7569; }
+.allocation-lock-confirm .play-button { min-height:38px; padding:0 12px; }
+.allocation-wait-note { margin:2px 0; color:#78918c; font-size:9px; font-weight:800; line-height:1.4; }
+.ready-button:disabled,.play-button:disabled { opacity:.55; cursor:not-allowed; }
+.voice-dock { width:min(365px,calc(100vw - 36px)); max-height:min(48vh,440px); padding:13px; gap:11px; }
+.voice-dock.is-collapsed { display:block; width:min(340px,calc(100vw - 28px)); max-height:none; overflow:visible; padding:7px 9px; border-width:2px; border-radius:18px; }
+.voice-collapsed-content { display:flex; align-items:center; gap:9px; min-height:38px; }
+.voice-headphones-icon { width:21px; height:21px; flex:none; fill:none; stroke:#47877f; stroke-linecap:round; stroke-linejoin:round; stroke-width:1.8; }
+.voice-collapsed-copy { display:grid; flex:1; min-width:0; gap:3px; }
+.voice-collapsed-copy>strong { overflow:hidden; color:#315d68; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.voice-collapsed-copy>small { display:flex; align-items:center; gap:6px; overflow:hidden; color:#78918c; font-size:7px; font-weight:900; text-overflow:ellipsis; white-space:nowrap; }
+.voice-dock .voice-collapsed-copy .voice-dot { width:7px; height:7px; box-shadow:none; }
+.voice-mic-indicator { flex:none; padding:5px 7px; border-radius:99px; background:#f0e6d5; color:#89755a; font-size:7px; font-weight:1000; letter-spacing:.04em; }
+.voice-mic-indicator.is-live { background:#d9f1df; color:#428666; }
+.voice-dock .voice-expand-button,.voice-dock .voice-collapse-button { display:grid; flex:none; place-items:center; width:40px; min-height:40px; padding:0; border:1px solid #dce8da; border-radius:50%; background:#fffdf3; color:#477c7c; font-size:17px; }
+.voice-dock-header { min-height:28px; }
+.voice-overall-status { font-size:8px; }
+.voice-dot.is-connected { background:#5bac7c; box-shadow:0 0 0 3px #dcefe0; }
+.voice-dot.is-connecting { background:#e2ae59; box-shadow:0 0 0 3px #f7ebd0; animation:voice-pulse .8s ease-in-out infinite alternate; }
+.voice-dot.is-reconnecting,.voice-dot.has-error { background:#d9796d; box-shadow:0 0 0 3px #f8dfd9; }
+.voice-primary-section { display:grid; gap:8px; padding:10px; border-radius:13px; background:#f5f4e7; }
+.voice-listening-summary { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; }
+.voice-listening-summary>span { color:#819691; font-size:7px; font-weight:1000; letter-spacing:.1em; }
+.voice-listening-summary>strong { color:#315d68; font-size:10px; }
+.voice-listening-summary .speaking-label { color:#448d69; font-size:8px; font-weight:900; }
+.voice-primary-actions { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+.voice-dock .voice-primary-actions button { min-height:40px; padding:8px 11px; }
+.voice-dock .voice-join-button { flex:1; }
+.voice-dock .voice-mic-button { flex:1; background:#e7d8c5; color:#665b4d; }
+.voice-dock .voice-mic-button.voice-active { background:#ed856f; color:#fff; }
+.voice-dock .voice-utility-button,.voice-dock .voice-leave { min-height:40px; }
+.voice-advanced-settings { border-top:1px solid #e4e8d9; padding-top:8px; }
+.voice-advanced-settings summary { display:flex; align-items:center; width:max-content; max-width:100%; min-height:40px; color:#62837e; font-size:9px; font-weight:1000; cursor:pointer; }
+.voice-advanced-settings summary:focus-visible { outline:3px solid #315d68; outline-offset:3px; border-radius:4px; }
+.voice-advanced-content { display:grid; gap:8px; padding-top:9px; }
+.voice-channel-settings { display:flex; align-items:center; justify-content:space-between; gap:10px; color:#668680; font-size:9px; font-weight:900; }
+.voice-dock .voice-destination button { min-height:40px; }
+.voice-dock .voice-global-toggle { min-height:40px; padding:7px 10px; }
+.voice-dock .voice-global-toggle[aria-pressed="true"] { background:#d3eddd; color:#34775e; }
+.voice-channel-settings .voice-destination { min-width:130px; }
+.voice-mic-hint { font-size:9px; }
+.voice-error { font-size:9px; }
+.voice-error p { font-size:9px; }
+.voice-error p strong { font-size:10px; }
+.voice-dock button:focus-visible { outline:3px solid #315d68; outline-offset:2px; }
+@media(max-width:800px) {
+  .room-heading { align-items:flex-start; }
+  .lobby-room-actions { align-items:flex-end; flex-direction:column; }
+  .lobby-steps { gap:5px; }
+  .lobby-steps li { padding:4px 8px; font-size:8px; }
+  .your-crew-label { margin-left:auto; }
+}
+@media(max-width:700px) {
+  .room-layout { padding-bottom:105px; }
+  .room-heading { flex-direction:column; gap:12px; }
+  .lobby-room-actions { width:100%; align-items:stretch; flex-direction:row; }
+  .room-invite-chip { flex:1; justify-content:space-between; min-width:0; }
+  .room-invite-chip>span { display:none; }
+  .lobby-room-actions>.quiet-button { min-height:44px; }
+  .lobby-steps { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); }
+  .lobby-steps li { justify-content:center; gap:4px; min-width:0; padding:5px 4px; font-size:7px; text-align:center; }
+  .lobby-steps li>span { flex:none; }
+  .team-card { padding:15px; }
+  .team-presence-summary { font-size:7px; }
+  .roster-connection { font-size:7px; }
+  .control-card { padding:16px; }
+  .allocation-summary strong { font-size:11px; }
+  .voice-dock:not(.is-match) { right:10px; bottom:10px; left:auto; width:min(350px,calc(100vw - 20px)); max-width:calc(100vw - 20px); }
+  .voice-dock.is-match { right:10px; bottom:166px; left:auto; width:min(350px,calc(100vw - 20px)); max-width:calc(100vw - 20px); }
+  .voice-dock.is-collapsed { width:min(340px,calc(100vw - 20px)); }
+}
+@media(max-width:430px) {
+  .room-context { font-size:10px; }
+  .room-invite-chip { gap:6px; padding-left:9px; }
+  .room-invite-chip>strong { font-size:13px; }
+  .room-invite-chip .copy-button { padding:7px 8px; font-size:7px; }
+  .your-crew-label { padding:4px 5px; font-size:6px; }
+  .team-card-heading h2 { font-size:18px; }
+  .team-card-heading .crew-count { font-size:11px; }
+  .roster-connection { gap:3px; font-size:6px; }
+  .allocation-row { grid-template-columns:minmax(0,1fr) 34px 63px 34px; gap:5px; }
+  .allocation-summary { gap:3px; padding:8px 6px; }
+  .allocation-summary span { font-size:6px; }
+  .voice-dock:not(.is-collapsed) { max-height:42dvh; overflow:auto; }
+  .voice-primary-actions { gap:5px; }
+  .voice-dock .voice-primary-actions button { min-height:40px; padding:7px 8px; font-size:9px; }
+  .voice-channel-settings { align-items:flex-start; flex-direction:column; }
+  .voice-channel-settings .voice-destination { width:100%; }
+}
+@media(prefers-reduced-motion:reduce) {
+  .voice-dot.is-connecting,.voice-dot.is-speaking { animation:none; }
+  .team-card,.roster-slot.occupied { transition:none; }
+}

@@ -1,8 +1,9 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { GAME_RULES, type LobbyCommand, type LobbySnapshot, type MatchSettings, type QuickPlaySettings, type RoomMode, type RoomSnapshot } from "@osmosis/shared";
 import type { NetworkStatus } from "../net/MultiplayerClient";
 import { TutorialBook } from "./TutorialBook";
+import { buildCrewRoster, getLobbyPermissions, getLobbyStage, summarizeAllocation } from "./lobbyPresentation";
 
 interface LobbyScreenProps {
   lobby: LobbySnapshot | null;
@@ -29,12 +30,24 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
   const [roomCode, setRoomCode] = useState(new URLSearchParams(window.location.search).get("room")?.toUpperCase() ?? "");
   const [partyCode, setPartyCode] = useState(new URLSearchParams(window.location.search).get("party")?.toUpperCase() ?? "");
   const [copied, setCopied] = useState(false);
+  const [confirmLock, setConfirmLock] = useState(false);
+  const [lockPending, setLockPending] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const tutorialButtonRef = useRef<HTMLButtonElement>(null);
   const closeTutorial = useCallback(() => {
     setTutorialOpen(false);
     window.requestAnimationFrame(() => tutorialButtonRef.current?.focus());
   }, []);
+  useEffect(() => {
+    if (!lockPending) return;
+    if (lobby?.ownTeamLocked || lobby?.phase !== "ALLOCATION" || error) {
+      setLockPending(false);
+      setConfirmLock(false);
+      return;
+    }
+    const timeout = window.setTimeout(() => setLockPending(false), 8_000);
+    return () => window.clearTimeout(timeout);
+  }, [error, lobby?.ownTeamLocked, lobby?.phase, lockPending]);
   const [roomMode, setRoomMode] = useState<RoomMode>("STANDARD");
   const [entryMode, setEntryMode] = useState<"PRIVATE" | "QUICK_PLAY" | "PARTY" | "JOIN">("PRIVATE");
   const [joinTarget, setJoinTarget] = useState<"ROOM" | "PARTY">("ROOM");
@@ -50,7 +63,14 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
   const isCaptain = self?.isCaptain ?? false;
   const isHost = self?.isHost ?? false;
   const pointsByPlayer = new Map(lobby?.ownTeamAllocation.map((entry) => [entry.playerId, entry.points ?? 0]) ?? []);
-  const totalPoints = [...pointsByPlayer.values()].reduce((sum, points) => sum + points, 0);
+  const allocationSummary = summarizeAllocation(
+    lobby?.ownTeamAllocation.map((entry) => entry.points) ?? [],
+    GAME_RULES.startingTeamPoints,
+    GAME_RULES.minimumStartingPointsPerPlayer,
+    GAME_RULES.allocationIncrement,
+  );
+  const totalPoints = allocationSummary.allocated;
+  const permissions = lobby ? getLobbyPermissions(lobby, self) : null;
   const activeEntryFormId = entryMode === "PRIVATE"
     ? "private-entry-form"
     : entryMode === "QUICK_PLAY"
@@ -142,7 +162,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
           <span className="brand-planet">✦</span><span>OSMOSIS</span><small>CREW UP!</small>
         </a>
         {lobby ? (
-          <div className="room-chip"><span className="online-dot" /> ROOM <strong>{lobby.roomCode}</strong></div>
+          <div className="room-chip"><span className="online-dot" /> CREW LOBBY</div>
         ) : <div className="lobby-header-actions"><div className="lobby-kicker">A LITTLE SPACE. A LOT OF TEAMWORK.</div><button ref={tutorialButtonRef} className="tutorial-open-button" aria-label="How to play" aria-haspopup="dialog" aria-expanded={tutorialOpen} title="How to play" onClick={() => setTutorialOpen(true)}>?</button></div>}
       </header>
 
@@ -267,38 +287,72 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
       ) : (
         <section className="room-layout">
           <div className="room-heading">
-            <div><p className="mini-label">PRE-MATCH AIRLOCK</p><h1>Gather your <span>crew.</span></h1></div>
-            <button className="quiet-button" onClick={onLeave}>LEAVE ROOM</button>
+            <div className="room-heading-copy">
+              <p className="mini-label">PRE-MATCH AIRLOCK</p>
+              <h1>Gather your <span>crew.</span></h1>
+              <p className="room-context">{lobby.teamSelectionLocked ? "Quick Play · crews are assigned" : lobby.roomMode === "TEST_1V1" ? "Test match · one player on each crew" : lobby.roomMode === "TEST_2V2" ? "Test match · two players on each crew" : "Invite your friends, then get both crews ready."} <span>{lobby.connectedPlayerCount}/{lobby.matchSettings.teamSize * 2} players connected</span></p>
+            </div>
+            <div className="lobby-room-actions">
+              {!lobby.teamSelectionLocked && <div className="room-invite-chip"><span>ROOM CODE</span><strong>{lobby.roomCode}</strong><button className="copy-button" onClick={() => void copyInvite()} aria-label={copied ? "Invite link copied" : "Copy room invite link"}>{copied ? "COPIED ✓" : "COPY INVITE"}</button></div>}
+              <button className="quiet-button" onClick={onLeave}>LEAVE ROOM</button>
+            </div>
           </div>
-          <div className="invite-strip"><span>{lobby.teamSelectionLocked ? "Quick Play · crew assignments are locked" : lobby.roomMode === "TEST_1V1" ? "Test match · one player on each crew" : lobby.roomMode === "TEST_2V2" ? "Test match · two players on each crew" : "Send your friends the room code"}</span>{!lobby.teamSelectionLocked && <><strong>{lobby.roomCode}</strong><button className="copy-button" onClick={() => void copyInvite()}>{copied ? "COPIED! ✓" : "COPY INVITE ↗"}</button></>}<span className="player-count">{lobby.connectedPlayerCount}/{lobby.matchSettings.teamSize * 2} PLAYERS</span></div>
+
+          <ol className="lobby-steps" aria-label="Pre-match progress">
+            {["Assemble crews", "Allocate points", "Ready for match"].map((step, index) => {
+              const currentStage = getLobbyStage(lobby);
+              const isComplete = index < currentStage;
+              const isCurrent = index === currentStage;
+              return <li className={`${isComplete ? "is-complete" : ""} ${isCurrent ? "is-current" : ""}`} aria-current={isCurrent ? "step" : undefined} key={step}>
+                <span>{isComplete ? "✓" : index + 1}</span>{step}
+              </li>;
+            })}
+          </ol>
 
           <div className="lobby-grid">
             {teams.map((team) => {
-              const roster = lobby.players.filter((player) => player.teamId === team.id);
+              const rosterSlots = buildCrewRoster(lobby.players, team.id, lobby.matchSettings.teamSize, lobby.selfPlayerId);
+              const roster = rosterSlots.flatMap((slot) => slot.player ? [slot.player] : []);
               const onlineCount = roster.filter((player) => player.connected).length;
               const reconnectingCount = roster.length - onlineCount;
+              const readyCount = roster.filter((player) => player.ready).length;
               const captainId = lobby.captainIds[team.id];
-              return <section className={`team-card team-card-${team.color}`} key={team.id}>
-                <header className="team-card-heading"><span className="team-emblem"><img src="/assets/characters/astronaut.png" alt="" /></span><div><p>{team.id === "BLUE" ? "COOL AS COSMOS" : "A LITTLE BIT BOLD"}</p><h2>{team.label}</h2></div><strong>{roster.length}/{lobby.matchSettings.teamSize}</strong></header>
-                <div className="team-presence-summary" role="group" aria-label={`${onlineCount} of ${lobby.matchSettings.teamSize} players online${reconnectingCount ? `, ${reconnectingCount} reconnecting` : ""}`}>
-                  <span className="presence-online"><i aria-hidden="true" />{onlineCount}/{lobby.matchSettings.teamSize} online</span>
+              const isYourCrew = self?.teamId === team.id;
+              return <section className={`team-card team-card-${team.color} ${isYourCrew ? "is-your-crew" : ""}`} key={team.id} aria-labelledby={`crew-${team.id}-title`}>
+                <header className="team-card-heading">
+                  <span className="team-emblem"><img src="/assets/characters/astronaut.png" alt="" /></span>
+                  <div className="team-heading-copy"><p>{team.id === "BLUE" ? "COOL AS COSMOS" : "A LITTLE BIT BOLD"}</p><h2 id={`crew-${team.id}-title`}>{team.label}</h2></div>
+                  {isYourCrew && <span className="your-crew-label">YOUR CREW</span>}
+                  <strong className="crew-count">{roster.length}/{lobby.matchSettings.teamSize}</strong>
+                </header>
+                <div className="team-presence-summary" aria-label={`${onlineCount} online${reconnectingCount ? `, ${reconnectingCount} reconnecting` : ""}${lobby.allocationComplete ? `, ${readyCount} ready` : ""}`}>
+                  <span className="presence-online"><i aria-hidden="true" />{onlineCount} online</span>
                   {reconnectingCount > 0 && <span className="presence-reconnecting"><i aria-hidden="true" />{reconnectingCount} reconnecting</span>}
+                  {lobby.allocationComplete && <span className="presence-ready">{readyCount}/{lobby.matchSettings.teamSize} ready</span>}
+                  {!lobby.allocationComplete && <span>{captainId ? "Captain selected" : "Captain needed"}</span>}
                 </div>
-                <div className="roster-list">{Array.from({ length: lobby.matchSettings.teamSize }, (_, index) => {
-                  const player = roster[index];
-                  return <div className={`roster-slot ${player ? "occupied" : "empty"}`} key={player?.id ?? `${team.id}-${index}`}>
+                <ul className="roster-list" aria-label={`${team.label} roster`} aria-live="polite" aria-relevant="all">{rosterSlots.map(({ player, isLocalPlayer }, index) =>
+                  <li className={`roster-slot ${player ? "occupied" : "empty"} ${isLocalPlayer ? "is-local-player" : ""}`} key={player?.id ?? `${team.id}-${index}`}>
                     <span className="crew-avatar">{player ? <img src="/assets/characters/astronaut.png" alt="" /> : "+"}</span>
-                    <span className="crew-name">{player?.nickname ?? "Waiting for a crewmate"}</span>
-                    {player?.isHost && <small className="role-badge host-badge">HOST</small>}
-                    {player?.isCaptain && <small className="role-badge captain-badge">CAPTAIN</small>}
-                    {player && !player.connected && <small className="offline-badge">RECONNECTING</small>}
-                    {player?.connected && <small className="online-badge">ONLINE</small>}
-                    {player?.ready && <small className="ready-badge">READY ✓</small>}
-                  </div>;
-                })}</div>
-                {self && self.teamId !== team.id && lobby.phase === "LOBBY" && !lobby.allocationComplete && !lobby.teamSelectionLocked && <button className="team-action" onClick={() => onCommand({ type: "chooseTeam", teamId: team.id })}>JOIN THIS CREW</button>}
-                {self?.teamId === team.id && !captainId && lobby.phase === "LOBBY" && !lobby.allocationComplete && <button className="team-action" onClick={() => onCommand({ type: "captain", action: "claim" })}>BECOME CAPTAIN</button>}
-                {self?.isCaptain && captainId === self.id && lobby.phase === "LOBBY" && !lobby.allocationComplete && <button className="team-action secondary-action" onClick={() => onCommand({ type: "captain", action: "release" })}>STEP DOWN AS CAPTAIN</button>}
+                    {player ? <>
+                      <span className="crew-player-info">
+                        <span className="crew-name">{player.nickname}</span>
+                        <span className="crew-player-meta">
+                          {isLocalPlayer && <span className="local-player-label">You</span>}
+                          {player.isHost && <span>Host</span>}
+                          {player.isCaptain && <span>Captain</span>}
+                          {player.ready && lobby.allocationComplete && <span className="ready-label">Ready</span>}
+                        </span>
+                      </span>
+                      <span className={`roster-connection ${player.connected ? "is-online" : "is-reconnecting"}`} aria-label={player.connected ? "Online" : "Reconnecting"}>
+                        <i aria-hidden="true" />{player.connected ? "Online" : "Reconnecting"}
+                      </span>
+                    </> : <span className="crew-name">Waiting for player…</span>}
+                  </li>,
+                )}</ul>
+                {self && permissions?.canJoinCrew(team.id) && <button className="team-action" onClick={() => onCommand({ type: "chooseTeam", teamId: team.id })}>JOIN THIS CREW</button>}
+                {isYourCrew && !captainId && permissions?.canClaimCaptain && <button className="team-action" onClick={() => onCommand({ type: "captain", action: "claim" })}>BECOME CAPTAIN</button>}
+                {isYourCrew && self?.isCaptain && permissions?.canReleaseCaptain && captainId === self.id && <button className="team-action secondary-action" onClick={() => onCommand({ type: "captain", action: "release" })}>STEP DOWN AS CAPTAIN</button>}
               </section>;
             })}
           </div>
@@ -306,8 +360,13 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
           <section className="control-card">
             <div className="control-copy">
               <p className="mini-label">{lobby.phase === "ALLOCATION" ? "CAPTAIN'S TABLE" : lobby.phase === "COUNTDOWN" ? "AIRLOCK CLOSING" : "NEXT UP"}</p>
-              <h2>{lobby.phase === "ALLOCATION" ? "Share the team points." : lobby.phase === "COUNTDOWN" ? "Launching soon!" : lobby.allocationComplete ? "Ready for liftoff?" : "Pick your captains."}</h2>
-              <p>{lobby.phase === "ALLOCATION" ? `Your crew's captain can split ${totalPoints.toLocaleString()} points, with at least 500 for each crewmate. The other crew's plan stays private.` : lobby.phase === "COUNTDOWN" ? "The host can cancel if someone needs another moment." : lobby.allocationComplete ? `${lobby.players.filter((player) => player.ready).length}/${lobby.matchSettings.teamSize * 2} crewmates ready to launch.` : `Fill both crews (${lobby.matchSettings.teamSize} each), then each side picks a captain to plan its opening points.`}</p>
+              <h2>{lobby.phase === "ALLOCATION" ? "Share the team points." : lobby.phase === "COUNTDOWN" ? "Launching soon!" : lobby.allocationComplete ? "Ready for liftoff?" : "Build your crews."}</h2>
+              <p>{lobby.phase === "ALLOCATION"
+                ? lobby.ownTeamLocked ? "Your crew has locked its plan. The other captain is finishing their allocation." : isCaptain ? `Distribute ${GAME_RULES.startingTeamPoints.toLocaleString()} points among your crew. The other crew's plan stays private.` : "Your captain is distributing your crew's points. The other crew's plan stays private."
+                : lobby.phase === "COUNTDOWN" ? "The host can cancel if someone needs another moment."
+                  : lobby.allocationComplete ? `${lobby.players.filter((player) => player.ready).length}/${lobby.matchSettings.teamSize * 2} crewmates ready to launch. Ready up when your crew is set.`
+                  : permissions?.bothCrewsFull && permissions.bothCaptainsSelected ? isHost ? "Both crews are set. Open point allocation when you’re ready." : "Both crews are set. Waiting for the host to open point allocation."
+                      : `Fill both crews (${lobby.matchSettings.teamSize} each) and choose one captain per crew.`}</p>
               {error && <p className="lobby-error" role="alert">{error}</p>}
             </div>
             <div className="control-actions">
@@ -317,21 +376,32 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
                   const step = GAME_RULES.allocationIncrement;
                   const hasTeammate = ownTeamPlayers.some((candidate) => candidate.id !== player.id);
                   const hasDonor = ownTeamPlayers.some((candidate) => candidate.id !== player.id && (pointsByPlayer.get(candidate.id) ?? 0) >= GAME_RULES.minimumStartingPointsPerPlayer + step);
-                  return <div className="allocation-row" key={player.id}><span className="allocation-player"><span className="allocation-avatar"><img src="/assets/characters/astronaut.png" alt="" /></span>{player.nickname}{player.isCaptain ? " ✦" : ""}</span><button className="stepper" disabled={!isCaptain || lobby.ownTeamLocked || points <= GAME_RULES.minimumStartingPointsPerPlayer || !hasTeammate} onClick={() => changePoints(player.id, -step)} aria-label={`Remove ${step} points from ${player.nickname}`}>−</button><strong>{points.toLocaleString()}</strong><button className="stepper" disabled={!isCaptain || lobby.ownTeamLocked || !hasDonor} onClick={() => changePoints(player.id, step)} aria-label={`Add ${step} points to ${player.nickname}`}>+</button></div>;
+                  return <div className="allocation-row" key={player.id}><span className="allocation-player"><span className="allocation-avatar"><img src="/assets/characters/astronaut.png" alt="" /></span><span>{player.nickname}{player.isCaptain ? <small>CAPTAIN</small> : null}</span></span><button className="stepper" disabled={!permissions?.canAdjustAllocation || points <= GAME_RULES.minimumStartingPointsPerPlayer || !hasTeammate} onClick={() => changePoints(player.id, -step)} aria-label={`Remove ${step} points from ${player.nickname}`}>−</button><strong>{points.toLocaleString()}</strong><button className="stepper" disabled={!permissions?.canAdjustAllocation || !hasDonor} onClick={() => changePoints(player.id, step)} aria-label={`Add ${step} points to ${player.nickname}`}>+</button></div>;
                 })}</div>
-                {isCaptain && !lobby.ownTeamLocked && <button className="play-button compact-button" disabled={totalPoints !== 10_000} onClick={() => onCommand({ type: "lockAllocation" })}>LOCK MY CREW <span>✓</span></button>}
-                {lobby.ownTeamLocked && <div className="locked-note">YOUR CREW'S PLAN IS LOCKED ✓</div>}
+                <div className="allocation-summary" aria-live="polite" aria-label={`Total points ${GAME_RULES.startingTeamPoints.toLocaleString()}, allocated ${totalPoints.toLocaleString()}, remaining ${allocationSummary.remaining.toLocaleString()}`}>
+                  <div><span>Total points</span><strong>{GAME_RULES.startingTeamPoints.toLocaleString()}</strong></div>
+                  <div><span>Allocated</span><strong>{totalPoints.toLocaleString()}</strong></div>
+                  <div className={allocationSummary.remaining < 0 ? "has-allocation-error" : ""}><span>Remaining</span><strong>{allocationSummary.remaining.toLocaleString()}</strong></div>
+                </div>
+                {!allocationSummary.valid && <p className="allocation-wait-note" role="status">{allocationSummary.hasAllValues ? `Your allocation must total ${GAME_RULES.startingTeamPoints.toLocaleString()} points, with at least ${GAME_RULES.minimumStartingPointsPerPlayer.toLocaleString()} per crewmate.` : "Waiting for the crew allocation to sync…"}</p>}
+                {isCaptain && !lobby.ownTeamLocked && !confirmLock && <button className="play-button compact-button" disabled={!permissions?.canLockAllocation || !allocationSummary.valid} onClick={() => setConfirmLock(true)}>REVIEW CREW ALLOCATION <span>→</span></button>}
+                {confirmLock && !lobby.ownTeamLocked && <div className="allocation-lock-confirm" role="group" aria-label="Confirm crew allocation lock" aria-busy={lockPending}>
+                  <p>Locking is final. Your crew’s points can’t be changed after confirmation.</p>
+                  <div><button className="quiet-button" disabled={lockPending} onClick={() => setConfirmLock(false)}>GO BACK</button><button className="play-button compact-button" disabled={lockPending || !permissions?.canLockAllocation || !allocationSummary.valid} onClick={() => { setLockPending(true); onCommand({ type: "lockAllocation" }); }}>{lockPending ? "LOCKING…" : "LOCK MY CREW"}</button></div>
+                </div>}
+                {!isCaptain && !lobby.ownTeamLocked && <p className="allocation-wait-note">Your captain is in charge of this allocation.</p>}
+                {lobby.ownTeamLocked && <div className="locked-note" role="status">YOUR CREW'S PLAN IS LOCKED ✓</div>}
               </>}
-              {lobby.phase === "LOBBY" && !lobby.allocationComplete && isHost && <button className="play-button compact-button" disabled={lobby.connectedPlayerCount !== lobby.matchSettings.teamSize * 2 || lobby.captainIds.BLUE === null || lobby.captainIds.RED === null} onClick={() => onCommand({ type: "beginAllocation" })}>OPEN POINT ALLOCATION <span>→</span></button>}
+              {lobby.phase === "LOBBY" && !lobby.allocationComplete && isHost && <button className="play-button compact-button" disabled={!permissions?.canOpenAllocation} onClick={() => onCommand({ type: "beginAllocation" })}>OPEN POINT ALLOCATION <span>→</span></button>}
               {lobby.phase === "LOBBY" && lobby.allocationComplete && <>
-                <button className={`ready-button ${self?.ready ? "ready-on" : ""}`} onClick={() => onCommand({ type: "ready", ready: !self?.ready })}>{self?.ready ? "I'M READY ✓" : "READY UP"}</button>
-                {isHost && <button className="play-button compact-button" disabled={lobby.connectedPlayerCount !== lobby.matchSettings.teamSize * 2 || lobby.players.some((player) => !player.ready)} onClick={() => onCommand({ type: "startCountdown" })}>START MATCH <span>→</span></button>}
+                <button className={`ready-button ${self?.ready ? "ready-on" : ""}`} disabled={!permissions?.canReady} onClick={() => onCommand({ type: "ready", ready: !self?.ready })}>{self?.ready ? "I'M READY ✓" : "READY UP"}</button>
+                {isHost && <button className="play-button compact-button" disabled={!permissions?.canStartMatch} onClick={() => onCommand({ type: "startCountdown" })}>START MATCH <span>→</span></button>}
               </>}
-              {lobby.phase === "COUNTDOWN" && <><div className="countdown-number">{lobby.countdownSecondsRemaining ?? 0}</div>{isHost && <button className="quiet-button" onClick={() => onCommand({ type: "cancelCountdown" })}>CANCEL COUNTDOWN</button>}</>}
-              {lobby.phase === "LOBBY" && !lobby.allocationComplete && <div className="requirement-note">{lobby.connectedPlayerCount < lobby.matchSettings.teamSize * 2 ? `Waiting for ${lobby.matchSettings.teamSize * 2 - lobby.connectedPlayerCount} more players` : "Both captains need to be selected"}</div>}
+              {lobby.phase === "COUNTDOWN" && <><div className="countdown-number">{lobby.countdownSecondsRemaining ?? 0}</div>{permissions?.canCancelCountdown && <button className="quiet-button" onClick={() => onCommand({ type: "cancelCountdown" })}>CANCEL COUNTDOWN</button>}</>}
+              {lobby.phase === "LOBBY" && !lobby.allocationComplete && <div className="requirement-note">{!permissions?.bothCrewsFull ? `Waiting for ${lobby.matchSettings.teamSize * 2 - lobby.players.length} more player${lobby.matchSettings.teamSize * 2 - lobby.players.length === 1 ? "" : "s"}` : !permissions.bothCaptainsSelected ? "Choose a captain for each crew" : "Waiting for the host to open point allocation"}</div>}
             </div>
           </section>
-          <footer className="lobby-footer"><span className="online-dot" /> SERVER CONNECTED <span>·</span> {networkStatus.connectedPlayerCount}/{lobby.matchSettings.teamSize * 2} PLAYERS</footer>
+          <footer className="lobby-footer"><span className="online-dot" /> SERVER CONNECTED</footer>
         </section>
       )}
       {tutorialOpen && !lobby && <TutorialBook onClose={closeTutorial} />}
