@@ -7,7 +7,7 @@ describe("match duration slider", () => {
     expect(getDurationMarks(5, 30)).toEqual([5, 10, 15, 20, 25, 30]);
   });
 
-  it("keeps Quick Play on its existing five-to-twenty minute presets", () => {
-    expect(getDurationMarks(5, 20)).toEqual([5, 10, 15, 20]);
+  it("renders custom duration bounds in five-minute increments", () => {
+    expect(getDurationMarks(10, 30)).toEqual([10, 15, 20, 25, 30]);
   });
 });

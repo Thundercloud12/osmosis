@@ -1,6 +1,7 @@
 export interface QueueGroup<T> {
   id: string;
   createdAt: number;
+  queueOrder?: number;
   members: readonly T[];
 }
 
@@ -13,7 +14,9 @@ export interface ComposedMatch<T> {
 export function composeMatch<G extends QueueGroup<unknown>>(groups: readonly G[], teamSize: 4 | 5): { blue: G[]; red: G[] } | undefined {
   const candidates = groups
     .filter((group) => group.members.length > 0 && group.members.length <= teamSize)
-    .toSorted((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
+    .toSorted((left, right) => (left.queueOrder ?? Number.MAX_SAFE_INTEGER) - (right.queueOrder ?? Number.MAX_SAFE_INTEGER)
+      || left.createdAt - right.createdAt
+      || left.id.localeCompare(right.id));
   if (candidates.reduce((sum, group) => sum + group.members.length, 0) < teamSize * 2) return undefined;
 
   const states = new Map<string, { blueCount: number; redCount: number; blue: G[]; red: G[] }>();

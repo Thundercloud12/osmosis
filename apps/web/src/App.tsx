@@ -5,7 +5,7 @@ import { MatchmakingScreen } from "./lobby/MatchmakingScreen";
 import { ArenaCanvas } from "./game/ArenaCanvas";
 import { ResultsScreen } from "./lobby/ResultsScreen";
 import { MultiplayerClient, type NetworkStatus } from "./net/MultiplayerClient";
-import type { LobbyCommand, LobbySnapshot, MatchmakingCommand, MatchmakingSnapshot, MatchSettings, QuickPlaySettings, RoomMode, RoomSnapshot } from "@osmosis/shared";
+import type { LobbyCommand, LobbySnapshot, MatchmakingCommand, MatchmakingSnapshot, MatchSettings, RoomMode, RoomSnapshot } from "@osmosis/shared";
 import { VoiceControls } from "./voice/VoiceControls";
 
 export function App() {
@@ -109,20 +109,20 @@ export function App() {
     }
   }, [network]);
 
-  const startSoloQuickPlay = useCallback(async (nickname: string, settings: QuickPlaySettings) => {
+  const startSoloQuickPlay = useCallback(async (nickname: string) => {
     setError(undefined);
     setMatchmakingActive(true);
-    try { await network.queueSolo(nickname, settings); }
+    try { await network.queueSolo(nickname); }
     catch (queueError) {
       setMatchmakingActive(false);
       setError(queueError instanceof Error ? queueError.message : "Could not join Quick Play.");
     }
   }, [network]);
 
-  const createParty = useCallback(async (nickname: string, settings: QuickPlaySettings) => {
+  const createParty = useCallback(async (nickname: string) => {
     setError(undefined);
     setMatchmakingActive(true);
-    try { await network.createParty(nickname, settings); }
+    try { await network.createParty(nickname); }
     catch (partyError) {
       setMatchmakingActive(false);
       setError(partyError instanceof Error ? partyError.message : "Could not create a crew party.");
@@ -147,6 +147,16 @@ export function App() {
       setError(joinError instanceof Error ? joinError.message : "Could not join that room.");
     }
   }, [network]);
+
+  const joinOpenRoom = useCallback(async (nickname: string, roomCode: string) => {
+    setError(undefined);
+    try { await network.joinOpenRoom(roomCode, nickname); }
+    catch (joinError) {
+      setError(joinError instanceof Error ? joinError.message : "Could not join that open room.");
+    }
+  }, [network]);
+
+  const listOpenRooms = useCallback((signal?: AbortSignal) => network.listOpenRooms(signal), [network]);
 
   const sendCommand = useCallback((command: LobbyCommand) => {
     setError(undefined);
@@ -186,6 +196,8 @@ export function App() {
       onQuickPlay={startSoloQuickPlay}
       onCreateParty={createParty}
       onJoinParty={joinParty}
+      onJoinOpenRoom={joinOpenRoom}
+      onListOpenRooms={listOpenRooms}
       onCommand={sendCommand}
       onLeave={leaveRoom}
     />

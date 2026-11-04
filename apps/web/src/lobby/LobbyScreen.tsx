@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { GAME_RULES, QUICK_PLAY_DURATION_PRESETS_SECONDS, type LobbyCommand, type LobbySnapshot, type MatchSettings, type QuickPlaySettings, type RoomMode, type RoomSnapshot } from "@osmosis/shared";
+import { GAME_RULES, QUICK_PLAY_SETTINGS, type LobbyCommand, type LobbySnapshot, type MatchSettings, type OpenRoomListing, type RoomMode, type RoomSnapshot } from "@osmosis/shared";
 import type { NetworkStatus } from "../net/MultiplayerClient";
 import { TutorialBook } from "./TutorialBook";
 import { MatchDurationSlider } from "./MatchDurationSlider";
+import { OpenRoomsPanel } from "./OpenRoomsPanel";
 import { buildCrewRoster, getLobbyPermissions, getLobbyStage, summarizeAllocation } from "./lobbyPresentation";
 
 interface LobbyScreenProps {
@@ -13,9 +14,11 @@ interface LobbyScreenProps {
   latestRoomSnapshot: RoomSnapshot | null;
   onCreate: (nickname: string, roomMode: RoomMode, matchSettings: MatchSettings) => void;
   onJoin: (nickname: string, code: string) => void;
-  onQuickPlay: (nickname: string, settings: QuickPlaySettings) => void;
-  onCreateParty: (nickname: string, settings: QuickPlaySettings) => void;
+  onQuickPlay: (nickname: string) => void;
+  onCreateParty: (nickname: string) => void;
   onJoinParty: (nickname: string, code: string) => void;
+  onJoinOpenRoom: (nickname: string, code: string) => void;
+  onListOpenRooms: (signal?: AbortSignal) => Promise<OpenRoomListing[]>;
   onCommand: (command: LobbyCommand) => void;
   onLeave: () => void;
 }
@@ -24,10 +27,7 @@ const teams = [
   { id: "BLUE", label: "Blue Crew", color: "blue" },
   { id: "RED", label: "Red Crew", color: "red" },
 ] as const;
-const minimumQuickPlayMinutes = QUICK_PLAY_DURATION_PRESETS_SECONDS[0] / 60;
-const maximumQuickPlayMinutes = QUICK_PLAY_DURATION_PRESETS_SECONDS[QUICK_PLAY_DURATION_PRESETS_SECONDS.length - 1] / 60;
-
-export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQuickPlay, onCreateParty, onJoinParty, onCommand, onLeave }: LobbyScreenProps) {
+export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQuickPlay, onCreateParty, onJoinParty, onJoinOpenRoom, onListOpenRooms, onCommand, onLeave }: LobbyScreenProps) {
   const [nickname, setNickname] = useState("");
   const [nameMissing, setNameMissing] = useState(false);
   const [roomCode, setRoomCode] = useState(new URLSearchParams(window.location.search).get("room")?.toUpperCase() ?? "");
@@ -52,11 +52,13 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
     return () => window.clearTimeout(timeout);
   }, [error, lobby?.ownTeamLocked, lobby?.phase, lockPending]);
   const [roomMode, setRoomMode] = useState<RoomMode>("STANDARD");
-  const [entryMode, setEntryMode] = useState<"PRIVATE" | "QUICK_PLAY" | "PARTY" | "JOIN">("PRIVATE");
-  const [joinTarget, setJoinTarget] = useState<"ROOM" | "PARTY">("ROOM");
+  const [entryMode, setEntryMode] = useState<"PRIVATE" | "QUICK_PLAY" | "OPEN_ROOMS">("PRIVATE");
   const [teamSize, setTeamSize] = useState<4 | 5>(5);
   const [privateDuration, setPrivateDuration] = useState(15);
-  const [quickPlayDuration, setQuickPlayDuration] = useState<QuickPlaySettings["matchDurationSeconds"]>(900);
+  const [openRooms, setOpenRooms] = useState<OpenRoomListing[]>([]);
+  const [openRoomsLoading, setOpenRoomsLoading] = useState(false);
+  const [openRoomsError, setOpenRoomsError] = useState<string>();
+  const [openRoomsRefresh, setOpenRoomsRefresh] = useState(0);
   const testRoomModesEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_ROOM_MODES === "true";
   const self = lobby?.players.find((player) => player.id === lobby.selfPlayerId);
   const ownTeamPlayers = useMemo(
@@ -74,15 +76,37 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
   );
   const totalPoints = allocationSummary.allocated;
   const permissions = lobby ? getLobbyPermissions(lobby, self) : null;
-  const activeEntryFormId = entryMode === "PRIVATE"
-    ? "private-entry-form"
-    : entryMode === "QUICK_PLAY"
-      ? "quickplay-entry-form"
-      : entryMode === "PARTY"
-        ? "party-entry-form"
-        : joinTarget === "ROOM"
-          ? "join-room-form"
-          : "join-party-form";
+  useEffect(() => {
+    if (lobby || entryMode !== "OPEN_ROOMS") return;
+    let active = true;
+    let inFlight = false;
+    let controller: AbortController | undefined;
+    const refresh = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      controller = new AbortController();
+      setOpenRoomsLoading(true);
+      try {
+        const rooms = await onListOpenRooms(controller.signal);
+        if (!active) return;
+        setOpenRooms(rooms);
+        setOpenRoomsError(undefined);
+      } catch (roomListError) {
+        if (!active || (roomListError instanceof DOMException && roomListError.name === "AbortError")) return;
+        setOpenRoomsError(roomListError instanceof Error ? roomListError.message : "Could not load open rooms.");
+      } finally {
+        inFlight = false;
+        if (active) setOpenRoomsLoading(false);
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 10_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      controller?.abort();
+    };
+  }, [entryMode, lobby, onListOpenRooms, openRoomsRefresh]);
 
   function submitCreate(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -110,30 +134,38 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
     onJoin(name, roomCode.trim().toUpperCase());
   }
 
-  function submitQuickPlay(action: "solo" | "party") {
+  function requiredNickname(): string | undefined {
     const name = nickname.trim();
     if (!name) {
       setNameMissing(true);
       document.getElementById("nickname")?.focus();
-      return;
+      return undefined;
     }
     setNameMissing(false);
-    const settings: QuickPlaySettings = { teamSize, matchDurationSeconds: quickPlayDuration };
-    if (action === "solo") onQuickPlay(name, settings);
-    else onCreateParty(name, settings);
+    return name;
+  }
+
+  function submitQuickPlay() {
+    const name = requiredNickname();
+    if (name) onQuickPlay(name);
+  }
+
+  function submitCreateParty() {
+    const name = requiredNickname();
+    if (name) onCreateParty(name);
   }
 
   function submitJoinParty(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const name = nickname.trim();
-    if (!name) {
-      setNameMissing(true);
-      document.getElementById("nickname")?.focus();
-      return;
-    }
+    const name = requiredNickname();
+    if (!name) return;
     if (partyCode.trim().length !== 6) return;
-    setNameMissing(false);
     onJoinParty(name, partyCode.trim().toUpperCase());
+  }
+
+  function joinListedRoom(code: string) {
+    const name = requiredNickname();
+    if (name) onJoinOpenRoom(name, code);
   }
 
   function changePoints(playerId: string, delta: number) {
@@ -178,20 +210,19 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
             <p className="welcome-subtitle">Team up, share the points, and take over the arena together.</p>
           </div>
           <div className="welcome-card">
-            <div className="card-tab">YOUR CREW STARTS HERE</div>
+            <div className="card-tab">CHOOSE YOUR NEXT MATCH</div>
             <div className="entry-name-field">
               <label className="field-label" htmlFor="nickname">CREWMATE NAME · REQUIRED</label>
-              <input id="nickname" form={activeEntryFormId} className="lobby-input" value={nickname} maxLength={24} placeholder="e.g. Starbean" required aria-required="true" aria-invalid={nameMissing && !nickname.trim()} aria-describedby={nameMissing && !nickname.trim() ? "nickname-error" : undefined} onInvalid={() => setNameMissing(true)} onChange={(event) => { setNickname(event.target.value); if (event.target.value.trim()) setNameMissing(false); }} />
+              <input id="nickname" className="lobby-input" value={nickname} maxLength={24} placeholder="e.g. Starbean" required aria-required="true" aria-invalid={nameMissing && !nickname.trim()} aria-describedby={nameMissing && !nickname.trim() ? "nickname-error" : undefined} onInvalid={() => setNameMissing(true)} onChange={(event) => { setNickname(event.target.value); if (event.target.value.trim()) setNameMissing(false); }} />
               {nameMissing && !nickname.trim() && <p id="nickname-error" className="field-validation" role="alert">ENTER A CREWMATE NAME TO CONTINUE.</p>}
             </div>
             <div className="entry-mode-picker" role="group" aria-label="Choose how to play">
-              <button type="button" className={entryMode === "PRIVATE" ? "is-selected" : ""} aria-pressed={entryMode === "PRIVATE"} onClick={() => setEntryMode("PRIVATE")}>Private room</button>
+              <button type="button" className={entryMode === "PRIVATE" ? "is-selected" : ""} aria-pressed={entryMode === "PRIVATE"} onClick={() => setEntryMode("PRIVATE")}>Private Match</button>
               <button type="button" className={entryMode === "QUICK_PLAY" ? "is-selected" : ""} aria-pressed={entryMode === "QUICK_PLAY"} onClick={() => setEntryMode("QUICK_PLAY")}>Quick Play</button>
-              <button type="button" className={entryMode === "PARTY" ? "is-selected" : ""} aria-pressed={entryMode === "PARTY"} onClick={() => setEntryMode("PARTY")}>Crew party</button>
-              <button type="button" className={entryMode === "JOIN" ? "is-selected" : ""} aria-pressed={entryMode === "JOIN"} onClick={() => setEntryMode("JOIN")}>Join by code</button>
+              <button type="button" className={entryMode === "OPEN_ROOMS" ? "is-selected" : ""} aria-pressed={entryMode === "OPEN_ROOMS"} onClick={() => setEntryMode("OPEN_ROOMS")}>Open Rooms</button>
             </div>
 
-            <section className="entry-mode-panel" aria-label={`${entryMode === "PRIVATE" ? "Private room" : entryMode === "QUICK_PLAY" ? "Quick Play" : entryMode === "PARTY" ? "Crew party" : "Join with a code"} options`}>
+            <section id="entry-options" className="entry-mode-panel" aria-label={entryMode === "PRIVATE" ? "Private match options" : entryMode === "QUICK_PLAY" ? "Quick Play options" : "Open room list"}>
               {entryMode === "PRIVATE" && <>
                 <div className="entry-panel-copy"><strong>HOST A PRIVATE MATCH</strong><span>Invite your crew with a room code.</span></div>
                 <form id="private-entry-form" onSubmit={submitCreate}>
@@ -216,55 +247,31 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
                     {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE PRIVATE ROOM"}<span>→</span>
                   </button>
                 </form>
+                <div className="entry-divider"><span>OR JOIN A PRIVATE ROOM</span></div>
+                <form id="join-room-form" onSubmit={submitJoin} className="entry-code-form">
+                  <label className="field-label" htmlFor="room-code">ROOM CODE · 6 LETTERS</label>
+                  <div className="join-row"><input id="room-code" className="lobby-input code-input" value={roomCode} maxLength={6} placeholder="ABC123" onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={roomCode.length !== 6 || networkStatus.state === "connecting"}>JOIN ROOM</button></div>
+                </form>
               </>}
 
               {entryMode === "QUICK_PLAY" && <>
-                <div className="entry-panel-copy"><strong>FIND YOUR NEXT MATCH</strong><span>We’ll match you with players looking for a game.</span></div>
-                <form id="quickplay-entry-form" onSubmit={(event) => { event.preventDefault(); submitQuickPlay("solo"); }}>
-                  <div className="entry-settings-grid">
-                    <div className="entry-field">
-                      <label className="field-label" htmlFor="quickplay-team-size">TEAM SIZE</label>
-                      <select id="quickplay-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
-                    </div>
-                    <MatchDurationSlider id="quickplay-duration" label="MATCH LENGTH" valueMinutes={quickPlayDuration / 60} minimumMinutes={minimumQuickPlayMinutes} maximumMinutes={maximumQuickPlayMinutes} onChange={(minutes) => setQuickPlayDuration((minutes * 60) as QuickPlaySettings["matchDurationSeconds"])} />
-                  </div>
-                  <button type="submit" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"}>
-                    {networkStatus.state === "connecting" ? "CONNECTING…" : "PLAY QUICK PLAY"}<span>✦</span>
-                  </button>
+                <div className="entry-panel-copy"><strong>ONE CLICK. FIRST FAIR MATCH.</strong><span>Quick Play puts you in one FIFO {QUICK_PLAY_SETTINGS.teamSize}v{QUICK_PLAY_SETTINGS.teamSize} queue. The oldest compatible players are assigned first · {QUICK_PLAY_SETTINGS.matchDurationSeconds / 60} minutes per match.</span></div>
+                <button type="button" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"} onClick={submitQuickPlay}>
+                  {networkStatus.state === "connecting" ? "CONNECTING…" : "PLAY QUICK PLAY"}<span>✦</span>
+                </button>
+                <div className="entry-divider"><span>PLAY WITH FRIENDS</span></div>
+                <button type="button" className="secondary-entry-button" disabled={networkStatus.state === "connecting"} onClick={submitCreateParty}>CREATE A CREW PARTY</button>
+                <form id="join-party-form" onSubmit={submitJoinParty} className="entry-code-form">
+                  <label className="field-label" htmlFor="party-code">HAVE A PARTY CODE?</label>
+                  <div className="join-row"><input id="party-code" className="lobby-input code-input" value={partyCode} maxLength={6} placeholder="ABC123" onChange={(event) => setPartyCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={partyCode.length !== 6 || networkStatus.state === "connecting"}>JOIN CREW</button></div>
                 </form>
               </>}
 
-              {entryMode === "PARTY" && <>
-                <div className="entry-panel-copy"><strong>BRING YOUR CREW</strong><span>Start a party, then invite friends to queue together.</span></div>
-                <form id="party-entry-form" onSubmit={(event) => { event.preventDefault(); submitQuickPlay("party"); }}>
-                  <div className="entry-settings-grid">
-                    <div className="entry-field">
-                      <label className="field-label" htmlFor="party-team-size">TEAM SIZE</label>
-                      <select id="party-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
-                    </div>
-                    <MatchDurationSlider id="party-duration" label="MATCH LENGTH" valueMinutes={quickPlayDuration / 60} minimumMinutes={minimumQuickPlayMinutes} maximumMinutes={maximumQuickPlayMinutes} onChange={(minutes) => setQuickPlayDuration((minutes * 60) as QuickPlaySettings["matchDurationSeconds"])} />
-                  </div>
-                  <button type="submit" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"}>
-                    {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE A CREW PARTY"}<span>→</span>
-                  </button>
-                </form>
-              </>}
-
-              {entryMode === "JOIN" && <>
-                <div className="entry-panel-copy"><strong>JOIN YOUR FRIENDS</strong><span>Choose the invite code you received.</span></div>
-                <div className="join-target-picker" role="group" aria-label="Type of invite code">
-                  <button type="button" className={joinTarget === "ROOM" ? "is-selected" : ""} aria-pressed={joinTarget === "ROOM"} onClick={() => setJoinTarget("ROOM")}>Room code</button>
-                  <button type="button" className={joinTarget === "PARTY" ? "is-selected" : ""} aria-pressed={joinTarget === "PARTY"} onClick={() => setJoinTarget("PARTY")}>Party code</button>
-                </div>
-                {joinTarget === "ROOM"
-                  ? <form id="join-room-form" onSubmit={submitJoin} className="entry-code-form">
-                    <label className="field-label" htmlFor="room-code">ROOM CODE · 6 LETTERS</label>
-                    <div className="join-row"><input id="room-code" className="lobby-input code-input" value={roomCode} maxLength={6} placeholder="ABC123" onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={roomCode.length !== 6 || networkStatus.state === "connecting"}>JOIN ROOM</button></div>
-                  </form>
-                  : <form id="join-party-form" onSubmit={submitJoinParty} className="entry-code-form">
-                    <label className="field-label" htmlFor="party-code">PARTY CODE · 6 LETTERS</label>
-                    <div className="join-row"><input id="party-code" className="lobby-input code-input" value={partyCode} maxLength={6} placeholder="ABC123" onChange={(event) => setPartyCode(event.target.value.toUpperCase().replace(/[^A-Z2-9]/g, ""))} /><button className="join-button" disabled={partyCode.length !== 6 || networkStatus.state === "connecting"}>JOIN PARTY</button></div>
-                  </form>}
+              {entryMode === "OPEN_ROOMS" && <>
+                <div className="entry-panel-copy"><strong>FIND AN OPEN CREW LOBBY</strong><span>Join a room whose host has opened it to everyone.</span></div>
+                <OpenRoomsPanel rooms={openRooms} loading={openRoomsLoading} error={openRoomsError}
+                  disabled={networkStatus.state === "connecting"} onRefresh={() => setOpenRoomsRefresh((value) => value + 1)}
+                  onJoin={joinListedRoom} />
               </>}
             </section>
 
@@ -282,6 +289,11 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
             </div>
             <div className="lobby-room-actions">
               {!lobby.teamSelectionLocked && <div className="room-invite-chip"><span>ROOM CODE</span><strong>{lobby.roomCode}</strong><button className="copy-button" onClick={() => void copyInvite()} aria-label={copied ? "Invite link copied" : "Copy room invite link"}>{copied ? "COPIED ✓" : "COPY INVITE"}</button></div>}
+              {!lobby.teamSelectionLocked && lobby.roomMode === "STANDARD" && lobby.phase === "LOBBY" && (isHost
+                ? <button type="button" className={`room-visibility-toggle ${lobby.isPublic ? "is-open" : ""}`} aria-pressed={lobby.isPublic} onClick={() => onCommand({ type: "setRoomPublic", isPublic: !lobby.isPublic })}>
+                  <span aria-hidden="true">{lobby.isPublic ? "◉" : "◎"}</span>{lobby.isPublic ? "CLOSE TO PUBLIC" : "OPEN TO PUBLIC"}
+                </button>
+                : <span className={`room-visibility-label ${lobby.isPublic ? "is-open" : ""}`}><i aria-hidden="true" />{lobby.isPublic ? "OPEN TO PUBLIC" : "PRIVATE ROOM"}</span>)}
               <button className="quiet-button" onClick={onLeave}>LEAVE ROOM</button>
             </div>
           </div>

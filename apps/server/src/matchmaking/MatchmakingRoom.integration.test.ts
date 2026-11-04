@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Client, type Room, type SeatReservation } from "@colyseus/sdk";
-import { lobbySnapshotSchema, matchmakingSnapshotSchema, type LobbySnapshot, type MatchmakingSnapshot } from "@osmosis/shared";
+import { QUICK_PLAY_SETTINGS, lobbySnapshotSchema, matchmakingSnapshotSchema, type LobbySnapshot, type MatchmakingSnapshot } from "@osmosis/shared";
 
 import { matchMaker } from "@colyseus/core";
 import { server } from "../app.config";
@@ -62,13 +62,12 @@ describe("M7 Quick Play room handoff", () => {
     await server.gracefullyShutdown(false);
   });
 
-  it.each([4, 5] as const)("keeps a party together through a complete %i-player-per-side handoff and locks its team", async (teamSize) => {
+  it("keeps a party together through a complete 5-player-per-side handoff and locks its team", async () => {
+    const teamSize = QUICK_PLAY_SETTINGS.teamSize;
     const clients = Array.from({ length: teamSize * 2 }, () => new Client(endpoint));
     const queueRooms: Room[] = [];
     const arenaRooms: Room[] = [];
     let partyPlayerIds: string[] = [];
-    const settings = { teamSize, matchDurationSeconds: 300 } as const;
-
     try {
       for (let index = 0; index < clients.length; index += 1) {
         const room = await clients[index]!.joinOrCreate("matchmaking", { nickname: `Quick Crew ${teamSize}-${index}` });
@@ -77,7 +76,7 @@ describe("M7 Quick Play room handoff", () => {
 
       const leaderRoom = queueRooms[0]!;
       const partyCreated = nextMatchmakingSnapshot(leaderRoom, (snapshot) => Boolean(snapshot.party));
-      leaderRoom.send("matchmakingCommand", { type: "createParty", settings });
+      leaderRoom.send("matchmakingCommand", { type: "createParty" });
       const created = await partyCreated;
       const partyCode = created.party!.code;
 
@@ -91,7 +90,7 @@ describe("M7 Quick Play room handoff", () => {
       const foundPromises = queueRooms.map((room) => nextMessage(room, "matchFound", isMatchFound));
       leaderRoom.send("matchmakingCommand", { type: "queueParty" });
       for (let index = 2; index < queueRooms.length; index += 1) {
-        queueRooms[index]!.send("matchmakingCommand", { type: "queueSolo", settings });
+        queueRooms[index]!.send("matchmakingCommand", { type: "queueSolo" });
       }
       const queued = await Promise.all(searchSnapshots);
       expect(queued.every((snapshot) => snapshot.queue?.status === "SEARCHING" || snapshot.queue?.status === "MATCH_FOUND")).toBe(true);
@@ -157,9 +156,7 @@ describe("M7 Quick Play room handoff", () => {
       }
       const leader = rooms[0]!;
       const createdPromise = nextMatchmakingSnapshot(leader, (snapshot) => Boolean(snapshot.party));
-      leader.send("matchmakingCommand", {
-        type: "createParty", settings: { teamSize: 4, matchDurationSeconds: 300 },
-      });
+      leader.send("matchmakingCommand", { type: "createParty" });
       const created = await createdPromise;
       const partyJoined = nextMatchmakingSnapshot(rooms[1]!, (snapshot) => snapshot.party?.members.length === 2);
       rooms[1]!.send("matchmakingCommand", { type: "joinParty", code: created.party!.code });
@@ -217,16 +214,14 @@ describe("M7 Quick Play room handoff", () => {
   }, 15_000);
 
   it("cancels the whole handoff if a player leaves before consuming their reserved seat", async () => {
-    const clients = Array.from({ length: 8 }, () => new Client(endpoint));
+    const clients = Array.from({ length: QUICK_PLAY_SETTINGS.teamSize * 2 }, () => new Client(endpoint));
     const rooms: Room[] = [];
     try {
       for (let index = 0; index < clients.length; index += 1) {
         rooms.push(await clients[index]!.joinOrCreate("matchmaking", { nickname: `Leaving Crew ${index}` }));
       }
       const foundPromises = rooms.map((room) => nextMessage(room, "matchFound", isMatchFound));
-      for (const room of rooms) room.send("matchmakingCommand", {
-        type: "queueSolo", settings: { teamSize: 4, matchDurationSeconds: 300 },
-      });
+      for (const room of rooms) room.send("matchmakingCommand", { type: "queueSolo" });
       const found = await Promise.all(foundPromises);
       const cancelledPromises = rooms.slice(1).map((room) => nextMessage(room, "handoffCancelled", hasMatchId));
 

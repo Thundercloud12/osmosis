@@ -5,6 +5,7 @@ import {
   TEAM_BASES,
   gameEventSchema,
   lobbySnapshotSchema,
+  openRoomsSnapshotSchema,
   roomSnapshotSchema,
   type LobbySnapshot,
   type RoomSnapshot,
@@ -217,6 +218,42 @@ describe("M3 lobby and multiplayer arena", () => {
       await Promise.all([...(reconnected ? [reconnected] : []), ...clients.slice(1)].map((client) => client.leave()));
     }
   }, 10_000);
+
+  it("lets only the host publish a standard lobby and removes it from public discovery when closed", async () => {
+    const clients: Room[] = [];
+    const host = await gameClient.create("arena", { nickname: "Room Host", matchSettings: { teamSize: 4 } });
+    clients.push(host);
+    const room = matchMaker.getLocalRoomById(host.roomId) as ArenaRoom;
+    const guest = await gameClient.joinById(host.roomId, { nickname: "Room Guest" });
+    clients.push(guest);
+
+    try {
+      const guestError = nextCommandError(guest as unknown as SnapshotClient);
+      guest.send("command", { type: "setRoomPublic", isPublic: true });
+      await expect(guestError).resolves.toContain("Only the host");
+      expect(room.publicRoomListing()).toBeUndefined();
+
+      const opened = lobbyUntil(host as unknown as SnapshotClient, (snapshot) => snapshot.isPublic);
+      host.send("command", { type: "setRoomPublic", isPublic: true });
+      await opened;
+      const listedResponse = await fetch("http://127.0.0.1:2568/rooms/open");
+      const listed = openRoomsSnapshotSchema.parse(await listedResponse.json());
+      expect(listed.rooms).toContainEqual(expect.objectContaining({ roomCode: host.roomId, playerCount: 2, maxPlayers: 8 }));
+
+      const publicGuest = await new Client("http://127.0.0.1:2568").joinById(host.roomId, { nickname: "Public Guest", publicRoomJoin: true });
+      clients.push(publicGuest);
+      expect(room.publicRoomListing()).toMatchObject({ roomCode: host.roomId, playerCount: 3 });
+
+      const closed = lobbyUntil(host as unknown as SnapshotClient, (snapshot) => !snapshot.isPublic);
+      host.send("command", { type: "setRoomPublic", isPublic: false });
+      await closed;
+      const closedResponse = await fetch("http://127.0.0.1:2568/rooms/open");
+      expect(openRoomsSnapshotSchema.parse(await closedResponse.json()).rooms).toEqual([]);
+      await expect(new Client("http://127.0.0.1:2568").joinById(host.roomId, { nickname: "Late Guest", publicRoomJoin: true })).rejects.toThrow();
+    } finally {
+      await Promise.allSettled(clients.map((client) => client.leave()));
+    }
+  }, 12_000);
 
   it("runs the ten-player lobby, locks private allocations, starts the match, syncs movement, and filters enemies", async () => {
     const clients: Room[] = [];

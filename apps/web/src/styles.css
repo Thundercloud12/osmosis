@@ -651,3 +651,49 @@ canvas {
 @media(max-width:700px) {
   .matchmaking-settings { grid-template-columns:auto minmax(120px,1fr); }
 }
+
+.entry-mode-picker { grid-template-columns:repeat(3,minmax(0,1fr)); }
+.entry-mode-picker button { min-height:40px; font-size:clamp(8px,2.4vw,10px); }
+.entry-divider { display:flex; align-items:center; gap:9px; margin:15px 0 10px; color:#98aaa0; font-size:7px; font-weight:1000; letter-spacing:.13em; white-space:nowrap; }
+.entry-divider::before,.entry-divider::after { height:1px; flex:1; background:#dedfce; content:""; }
+.secondary-entry-button { width:100%; min-height:42px; border:1px solid #b4d9ca; border-radius:12px; background:#e4f1df; color:#4b9687; font:1000 9px "Trebuchet MS",system-ui,sans-serif; letter-spacing:.08em; cursor:pointer; }
+.secondary-entry-button:disabled { opacity:.5; cursor:not-allowed; }
+.open-rooms-panel { display:grid; gap:10px; }
+.open-rooms-toolbar { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.open-rooms-toolbar p { margin:0; color:#75918b; font-size:9px; font-weight:900; }
+.open-rooms-refresh { min-height:31px; padding:0 10px; border:1px solid #d7e5d9; border-radius:9px; background:#fffdf3; color:#60847e; font:1000 7px "Trebuchet MS",system-ui,sans-serif; letter-spacing:.1em; cursor:pointer; }
+.open-rooms-refresh:disabled { opacity:.5; cursor:wait; }
+.open-rooms-list { display:grid; gap:8px; max-height:290px; overflow:auto; margin:0; padding:1px 3px 4px 1px; list-style:none; }
+.open-room-card { display:flex; align-items:center; justify-content:space-between; gap:9px; min-width:0; padding:9px; border:1px solid #e4e6d7; border-radius:13px; background:#fffdf3; }
+.open-room-main { display:grid; flex:1; gap:8px; min-width:0; }
+.open-room-heading { display:flex; align-items:center; flex-wrap:wrap; gap:6px 10px; }
+.open-room-heading strong { color:#315d68; font-size:9px; font-weight:1000; letter-spacing:.1em; }
+.open-room-heading span { color:#8a9c91; font-size:7px; font-weight:900; }
+.open-room-capacity { display:flex; align-items:center; gap:8px; }
+.open-room-capacity>span { flex:none; color:#81948c; font-size:7px; font-weight:800; }
+.open-room-capacity>span strong { color:#4c9385; font-size:9px; font-variant-numeric:tabular-nums; }
+.open-room-capacity-track { height:5px; flex:1; min-width:35px; overflow:hidden; border-radius:99px; background:#e3eadc; }
+.open-room-capacity-track>span { display:block; height:100%; border-radius:inherit; background:#67b6a0; }
+.open-room-join { min-height:34px; padding:0 9px; font-size:7px; }
+.open-rooms-empty { display:grid; justify-items:center; gap:5px; padding:22px 10px; border:1px dashed #d4dfd3; border-radius:14px; background:#ffffff65; text-align:center; }
+.open-rooms-empty>span { color:#edbd70; font-size:20px; }
+.open-rooms-empty strong { color:#537b7d; font-size:10px; }
+.open-rooms-empty p,.open-rooms-note { margin:0; color:#8a9d93; font-size:8px; font-weight:700; line-height:1.45; text-align:center; }
+.open-rooms-error { margin:0; color:#a94f52; font-size:8px; font-weight:800; }
+.room-visibility-toggle,.room-visibility-label { display:flex; align-items:center; justify-content:center; gap:6px; min-height:38px; padding:0 11px; border:1px solid #fff8e5; border-radius:99px; background:#fff9e8; color:#748d85; box-shadow:0 3px 0 #397c8030; font:1000 8px "Trebuchet MS",system-ui,sans-serif; letter-spacing:.07em; white-space:nowrap; }
+.room-visibility-toggle { cursor:pointer; }
+.room-visibility-toggle.is-open,.room-visibility-label.is-open { background:#def2dc; color:#428c70; }
+.room-visibility-toggle:focus-visible { outline:3px solid #315d68; outline-offset:2px; }
+.room-visibility-label>i { width:7px; height:7px; border-radius:50%; background:#b2c2bc; }
+.room-visibility-label.is-open>i { background:#55b888; }
+@media(max-width:800px) {
+  .open-rooms-list { max-height:240px; }
+  .lobby-room-actions { justify-content:flex-start; }
+}
+@media(max-width:430px) {
+  .welcome-card { padding:28px 19px 22px; }
+  .entry-mode-picker button { padding-inline:2px; font-size:8px; }
+  .open-room-card { gap:6px; padding:7px; }
+  .open-room-join { min-width:70px; padding-inline:6px; font-size:6px; }
+  .room-visibility-toggle,.room-visibility-label { min-height:34px; padding-inline:8px; font-size:7px; }
+}

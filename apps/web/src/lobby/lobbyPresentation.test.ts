@@ -23,6 +23,7 @@ const lobby = (overrides: Partial<LobbySnapshot> = {}): LobbySnapshot => ({
   voiceCredential: "x".repeat(20),
   voiceRoomName: "voice-room",
   hostPlayerId: "blue-1",
+  isPublic: false,
   teamSelectionLocked: false,
   connectedPlayerCount: 2,
   players: [

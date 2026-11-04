@@ -3,11 +3,14 @@ import { timingSafeEqual } from "node:crypto";
 import { defineRoom, defineServer, matchMaker } from "@colyseus/core";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { AccessToken } from "livekit-server-sdk";
-import { GAME_RULES } from "@osmosis/shared";
+import { GAME_RULES, openRoomsSnapshotSchema } from "@osmosis/shared";
 
 import { activeArenaRooms, ArenaRoom, type VoiceChannel } from "./rooms/ArenaRoom";
 import { runtimeMetrics } from "./observability/RuntimeMetrics";
 import { activeMatchmakingRoom, MatchmakingRoom } from "./matchmaking/MatchmakingRoom";
+import { WindowRateLimiter } from "./security/WindowRateLimiter";
+
+const openRoomListLimiter = new WindowRateLimiter();
 
 const allowedOrigins = new Set(
   (process.env.CLIENT_ORIGINS ?? "http://localhost:5173,http://127.0.0.1:5173")
@@ -35,6 +38,8 @@ export const server = defineServer({
     matchmaking: defineRoom(MatchmakingRoom),
   },
   express: (app) => {
+    // The game API is reachable through the single Caddy reverse proxy on EC2.
+    app.set("trust proxy", 1);
     app.use(express.json({ limit: "4kb" }));
     app.use((request: Request, response: Response, next: NextFunction) => {
       const origin = request.headers.origin;
@@ -54,6 +59,20 @@ export const server = defineServer({
     });
     app.get("/health", (_request: Request, response: Response) => {
       response.json({ status: "ok", quickPlayEnabled: process.env.NODE_ENV !== "production" || process.env.ENABLE_QUICK_PLAY === "true", voiceConfigured: Boolean(process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) });
+    });
+    app.get("/rooms/open", (request: Request, response: Response) => {
+      const requester = request.ip ?? request.socket.remoteAddress ?? "unknown";
+      if (!openRoomListLimiter.allow(requester, 60, 60_000)) {
+        response.setHeader("Retry-After", "10");
+        response.status(429).json({ error: "Room list refreshed too often. Try again in a moment." });
+        return;
+      }
+      const rooms = [...activeArenaRooms.values()]
+        .flatMap((room) => room.publicRoomListing() ?? [])
+        .sort((left, right) => left.openedAt - right.openedAt || left.roomCode.localeCompare(right.roomCode))
+        .slice(0, 100);
+      response.setHeader("Cache-Control", "no-store");
+      response.json(openRoomsSnapshotSchema.parse({ rooms }));
     });
     app.get("/internal/metrics", (request: Request, response: Response) => {
       const token = process.env.METRICS_TOKEN;

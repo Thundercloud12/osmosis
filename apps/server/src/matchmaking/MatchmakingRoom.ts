@@ -1,7 +1,4 @@
-import {
-  matchmakingCommandSchema,
-  type QuickPlaySettings,
-} from "@osmosis/shared";
+import { matchmakingCommandSchema } from "@osmosis/shared";
 import { Room, ServerError, matchMaker, type Client } from "@colyseus/core";
 
 import { WindowRateLimiter } from "../security/WindowRateLimiter";
@@ -157,11 +154,11 @@ export class MatchmakingRoom extends Room {
 
     try {
       switch (parsed.data.type) {
-        case "createParty": this.coordinator.createParty(playerId, parsed.data.settings); break;
+        case "createParty": this.coordinator.createParty(playerId); break;
         case "joinParty": this.coordinator.joinParty(playerId, parsed.data.code); break;
         case "leaveParty": this.coordinator.leaveParty(playerId); break;
-        case "updatePartySettings": this.coordinator.updatePartySettings(playerId, parsed.data.settings); break;
-        case "queueSolo": this.coordinator.queueSolo(playerId, parsed.data.settings); break;
+        case "updatePartySettings": throw new Error("Quick Play automatically uses the standard 5v5, 15-minute match settings.");
+        case "queueSolo": this.coordinator.queueSolo(playerId); break;
         case "queueParty": this.coordinator.queueParty(playerId); break;
         case "cancelQueue": {
           const removal = this.coordinator.cancelQueue(playerId);
