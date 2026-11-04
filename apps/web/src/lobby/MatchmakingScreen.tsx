@@ -1,6 +1,7 @@
 import { useState } from "react";
 
-import type { MatchmakingCommand, MatchmakingSnapshot, QuickPlaySettings } from "@osmosis/shared";
+import { QUICK_PLAY_DURATION_PRESETS_SECONDS, type MatchmakingCommand, type MatchmakingSnapshot, type QuickPlaySettings } from "@osmosis/shared";
+import { MatchDurationSlider } from "./MatchDurationSlider";
 
 interface MatchmakingScreenProps {
   snapshot: MatchmakingSnapshot | null;
@@ -9,7 +10,8 @@ interface MatchmakingScreenProps {
   onLeave: () => void;
 }
 
-const durations = [300, 600, 900, 1_200] as const;
+const minimumQuickPlayMinutes = QUICK_PLAY_DURATION_PRESETS_SECONDS[0] / 60;
+const maximumQuickPlayMinutes = QUICK_PLAY_DURATION_PRESETS_SECONDS[QUICK_PLAY_DURATION_PRESETS_SECONDS.length - 1] / 60;
 
 export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: MatchmakingScreenProps) {
   const [copied, setCopied] = useState(false);
@@ -69,10 +71,15 @@ export function MatchmakingScreen({ snapshot, error, onCommand, onLeave }: Match
               <select id="party-size" className="lobby-input" value={party.settings.teamSize} disabled={!isLeader || Boolean(queue)} onChange={(event) => updateSettings({ teamSize: Number(event.target.value) as 4 | 5 })}>
                 <option value={4}>4 versus 4</option><option value={5}>5 versus 5</option>
               </select>
-              <label className="field-label" htmlFor="party-duration">MATCH LENGTH</label>
-              <select id="party-duration" className="lobby-input" value={party.settings.matchDurationSeconds} disabled={!isLeader || Boolean(queue)} onChange={(event) => updateSettings({ matchDurationSeconds: Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"] })}>
-                {durations.map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
-              </select>
+              <MatchDurationSlider
+                id="party-duration"
+                label="MATCH LENGTH"
+                valueMinutes={party.settings.matchDurationSeconds / 60}
+                minimumMinutes={minimumQuickPlayMinutes}
+                maximumMinutes={maximumQuickPlayMinutes}
+                disabled={!isLeader || Boolean(queue)}
+                onChange={(minutes) => updateSettings({ matchDurationSeconds: (minutes * 60) as QuickPlaySettings["matchDurationSeconds"] })}
+              />
             </div>
             <p className="matchmaking-party-note">Quick Play pairs compatible teams and match lengths. Your party will never be split.</p>
             {isLeader && !queue && <button className="play-button compact-button" disabled={party.members.some((member) => !member.connected)} onClick={() => onCommand({ type: "queueParty" })}>QUEUE WITH MY CREW <span>→</span></button>}

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { GAME_RULES, type LobbyCommand, type LobbySnapshot, type MatchSettings, type QuickPlaySettings, type RoomMode, type RoomSnapshot } from "@osmosis/shared";
+import { GAME_RULES, QUICK_PLAY_DURATION_PRESETS_SECONDS, type LobbyCommand, type LobbySnapshot, type MatchSettings, type QuickPlaySettings, type RoomMode, type RoomSnapshot } from "@osmosis/shared";
 import type { NetworkStatus } from "../net/MultiplayerClient";
 import { TutorialBook } from "./TutorialBook";
+import { MatchDurationSlider } from "./MatchDurationSlider";
 import { buildCrewRoster, getLobbyPermissions, getLobbyStage, summarizeAllocation } from "./lobbyPresentation";
 
 interface LobbyScreenProps {
@@ -23,6 +24,8 @@ const teams = [
   { id: "BLUE", label: "Blue Crew", color: "blue" },
   { id: "RED", label: "Red Crew", color: "red" },
 ] as const;
+const minimumQuickPlayMinutes = QUICK_PLAY_DURATION_PRESETS_SECONDS[0] / 60;
+const maximumQuickPlayMinutes = QUICK_PLAY_DURATION_PRESETS_SECONDS[QUICK_PLAY_DURATION_PRESETS_SECONDS.length - 1] / 60;
 
 export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQuickPlay, onCreateParty, onJoinParty, onCommand, onLeave }: LobbyScreenProps) {
   const [nickname, setNickname] = useState("");
@@ -207,12 +210,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
                       <label className="field-label" htmlFor="private-team-size">TEAM SIZE</label>
                       <select id="private-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
                     </div>}
-                    <div className="entry-field">
-                      <label className="field-label" htmlFor="private-duration">MATCH LENGTH</label>
-                      <select id="private-duration" className="lobby-input" value={privateDuration} onChange={(event) => setPrivateDuration(Number(event.target.value))}>
-                        {Array.from({ length: 26 }, (_, index) => index + 5).map((minutes) => <option value={minutes} key={minutes}>{minutes} minutes</option>)}
-                      </select>
-                    </div>
+                    <MatchDurationSlider id="private-duration" label="MATCH LENGTH" valueMinutes={privateDuration} minimumMinutes={GAME_RULES.minimumMatchDurationSeconds / 60} maximumMinutes={GAME_RULES.maximumMatchDurationSeconds / 60} onChange={setPrivateDuration} />
                   </div>
                   <button type="submit" className="play-button entry-submit" disabled={networkStatus.state === "connecting"}>
                     {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE PRIVATE ROOM"}<span>→</span>
@@ -228,12 +226,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
                       <label className="field-label" htmlFor="quickplay-team-size">TEAM SIZE</label>
                       <select id="quickplay-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
                     </div>
-                    <div className="entry-field">
-                      <label className="field-label" htmlFor="quickplay-duration">MATCH LENGTH</label>
-                      <select id="quickplay-duration" className="lobby-input" value={quickPlayDuration} onChange={(event) => setQuickPlayDuration(Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"])}>
-                        {[300, 600, 900, 1200].map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
-                      </select>
-                    </div>
+                    <MatchDurationSlider id="quickplay-duration" label="MATCH LENGTH" valueMinutes={quickPlayDuration / 60} minimumMinutes={minimumQuickPlayMinutes} maximumMinutes={maximumQuickPlayMinutes} onChange={(minutes) => setQuickPlayDuration((minutes * 60) as QuickPlaySettings["matchDurationSeconds"])} />
                   </div>
                   <button type="submit" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"}>
                     {networkStatus.state === "connecting" ? "CONNECTING…" : "PLAY QUICK PLAY"}<span>✦</span>
@@ -249,12 +242,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
                       <label className="field-label" htmlFor="party-team-size">TEAM SIZE</label>
                       <select id="party-team-size" className="lobby-input" value={teamSize} onChange={(event) => setTeamSize(Number(event.target.value) as 4 | 5)}><option value={4}>4 versus 4</option><option value={5}>5 versus 5</option></select>
                     </div>
-                    <div className="entry-field">
-                      <label className="field-label" htmlFor="party-duration">MATCH LENGTH</label>
-                      <select id="party-duration" className="lobby-input" value={quickPlayDuration} onChange={(event) => setQuickPlayDuration(Number(event.target.value) as QuickPlaySettings["matchDurationSeconds"])}>
-                        {[300, 600, 900, 1200].map((seconds) => <option value={seconds} key={seconds}>{seconds / 60} minutes</option>)}
-                      </select>
-                    </div>
+                    <MatchDurationSlider id="party-duration" label="MATCH LENGTH" valueMinutes={quickPlayDuration / 60} minimumMinutes={minimumQuickPlayMinutes} maximumMinutes={maximumQuickPlayMinutes} onChange={(minutes) => setQuickPlayDuration((minutes * 60) as QuickPlaySettings["matchDurationSeconds"])} />
                   </div>
                   <button type="submit" className="play-button entry-submit quickplay-button" disabled={networkStatus.state === "connecting"}>
                     {networkStatus.state === "connecting" ? "CONNECTING…" : "CREATE A CREW PARTY"}<span>→</span>
