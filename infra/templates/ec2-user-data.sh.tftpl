@@ -6,7 +6,17 @@ exec > >(tee -a /var/log/osmosis-bootstrap.log | logger -t osmosis-bootstrap -s 
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y awscli ca-certificates curl gnupg jq python3 snapd
+apt-get install -y ca-certificates curl gnupg jq python3 snapd unzip
+
+# Install AWS CLI v2 from AWS's official installer. Ubuntu's repositories do
+# not consistently provide an awscli package for this Ubuntu 24.04 image.
+aws_cli_installer="$(mktemp)"
+trap 'rm -f "$aws_cli_installer"' EXIT
+curl -fsSL https://awscli.amazonaws.com/v2/install.sh -o "$aws_cli_installer"
+bash "$aws_cli_installer" --system
+rm -f "$aws_cli_installer"
+trap - EXIT
+aws --version
 
 # Docker's official Ubuntu repository.
 install -m 0755 -d /etc/apt/keyrings

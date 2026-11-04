@@ -13,7 +13,9 @@ resource "aws_instance" "game_server" {
     compose_file_b64  = local.compose_file_b64
     deploy_script_b64 = local.deploy_script_b64
   })
-  user_data_replace_on_change = false
+  # cloud-init runs bootstrap user data once per instance; replace the host
+  # when bootstrap changes so the new script is actually executed.
+  user_data_replace_on_change = true
 
   metadata_options {
     http_endpoint               = "enabled"
