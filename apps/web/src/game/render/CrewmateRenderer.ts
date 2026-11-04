@@ -4,6 +4,29 @@ import type { TeamId, RoomSnapshot } from "@osmosis/shared";
 export class CrewmateRenderer {
   constructor(private readonly scene: Phaser.Scene) {}
 
+  updateMovementPose(
+    avatar: Phaser.GameObjects.Image,
+    time: number,
+    walkPhase: number,
+    moving: boolean,
+    directionX: number,
+  ): void {
+    if (!moving) {
+      avatar.setPosition(0, -8 + Math.sin(time / 420) * 1.5);
+      avatar.setAngle(0);
+      avatar.setScale(0.56);
+      return;
+    }
+
+    // The single astronaut image has no animation frames, so a small alternating
+    // step bounce and lean gives it a walk cycle without changing its art or position.
+    const step = Math.sin(walkPhase);
+    const lift = Math.abs(step);
+    avatar.setPosition(step * 1.25, -8 - lift * 1.5);
+    avatar.setAngle(directionX * 2 + step * 2.5);
+    avatar.setScale(0.56 + lift * 0.006, 0.56 - lift * 0.006);
+  }
+
   createAstronaut(x: number, y: number, teamId: TeamId, depth: number): Phaser.GameObjects.Container {
     const teamColor = teamId === "BLUE" ? 0x348ede : 0xf36572;
     const shadow = this.scene.add.ellipse(0, 18, 54, 18, 0x345d62, 0.32);
