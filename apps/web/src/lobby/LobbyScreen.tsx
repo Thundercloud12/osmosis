@@ -289,7 +289,7 @@ export function LobbyScreen({ lobby, networkStatus, error, onCreate, onJoin, onQ
             </div>
             <div className="lobby-room-actions">
               {!lobby.teamSelectionLocked && <div className="room-invite-chip"><span>ROOM CODE</span><strong>{lobby.roomCode}</strong><button className="copy-button" onClick={() => void copyInvite()} aria-label={copied ? "Invite link copied" : "Copy room invite link"}>{copied ? "COPIED ✓" : "COPY INVITE"}</button></div>}
-              {!lobby.teamSelectionLocked && lobby.roomMode === "STANDARD" && lobby.phase === "LOBBY" && (isHost
+              {!lobby.teamSelectionLocked && lobby.phase === "LOBBY" && (isHost
                 ? <button type="button" className={`room-visibility-toggle ${lobby.isPublic ? "is-open" : ""}`} aria-pressed={lobby.isPublic} onClick={() => onCommand({ type: "setRoomPublic", isPublic: !lobby.isPublic })}>
                   <span aria-hidden="true">{lobby.isPublic ? "◉" : "◎"}</span>{lobby.isPublic ? "CLOSE TO PUBLIC" : "OPEN TO PUBLIC"}
                 </button>

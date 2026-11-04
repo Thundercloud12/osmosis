@@ -220,12 +220,19 @@ export type GameCommand = Extract<ClientCommand, { type: "interact" | "linkStart
 
 export const openRoomListingSchema = z.object({
   roomCode: z.string().length(6).regex(/^[A-Z2-9]+$/),
-  roomMode: z.literal("STANDARD"),
-  matchSettings: matchSettingsSchema.extend({ teamSize: z.union([z.literal(4), z.literal(5)]) }),
+  roomMode: roomModeSchema,
+  matchSettings: matchSettingsSchema,
   playerCount: z.number().int().min(0).max(10),
   maxPlayers: z.number().int().min(1).max(10),
   openedAt: z.number().int().nonnegative(),
-}).strict();
+}).strict().superRefine((listing, context) => {
+  const validTeamSizes = listing.roomMode === "STANDARD" ? [4, 5]
+    : listing.roomMode === "TEST_1V1" ? [1]
+      : [2];
+  if (!validTeamSizes.includes(listing.matchSettings.teamSize)) {
+    context.addIssue({ code: "custom", path: ["matchSettings", "teamSize"], message: "Room mode and team size do not match." });
+  }
+});
 export const openRoomsSnapshotSchema = z.object({
   rooms: z.array(openRoomListingSchema).max(100),
 }).strict();

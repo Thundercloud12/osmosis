@@ -23,7 +23,7 @@ export function OpenRoomsPanel({ rooms, loading, error, disabled, onRefresh, onJ
         const occupancy = Math.min(100, Math.round((room.playerCount / room.maxPlayers) * 100));
         return <li className="open-room-card" key={room.roomCode}>
           <div className="open-room-main">
-            <div className="open-room-heading"><strong>ROOM {room.roomCode}</strong><span>{teamSize}v{teamSize} · {matchLength} MIN</span></div>
+            <div className="open-room-heading"><strong>ROOM {room.roomCode}</strong><span>{room.roomMode === "STANDARD" ? "" : "TEST · "}{teamSize}v{teamSize} · {matchLength} MIN</span></div>
             <div className="open-room-capacity" role="group" aria-label={`${room.playerCount} of ${room.maxPlayers} players in room`}>
               <span><strong>{room.playerCount}/{room.maxPlayers}</strong> players</span>
               <div className="open-room-capacity-track" role="progressbar" aria-label="Room occupancy" aria-valuemin={0} aria-valuemax={room.maxPlayers} aria-valuenow={room.playerCount}>

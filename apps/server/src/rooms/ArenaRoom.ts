@@ -285,13 +285,11 @@ export class ArenaRoom extends Room {
   }
 
   publicRoomListing(): OpenRoomListing | undefined {
-    const teamSize = this.matchSettings.teamSize;
-    if (!this.isPublic || this.phase !== "LOBBY" || this.quickPlayConfig || this.roomMode !== "STANDARD"
-      || (teamSize !== 4 && teamSize !== 5) || this.players.size >= this.maxClients) return undefined;
+    if (!this.isPublic || this.phase !== "LOBBY" || this.quickPlayConfig || this.players.size >= this.maxClients) return undefined;
     return {
       roomCode: this.roomId,
-      roomMode: "STANDARD",
-      matchSettings: { ...this.matchSettings, teamSize },
+      roomMode: this.roomMode,
+      matchSettings: { ...this.matchSettings },
       playerCount: this.players.size,
       maxPlayers: this.maxClients,
       openedAt: this.publicOpenedAt,
@@ -479,8 +477,8 @@ export class ArenaRoom extends Room {
 
   private setRoomPublic(player: ServerPlayer, isPublic: boolean): void {
     if (player.id !== this.hostPlayerId) throw new Error("Only the host can open or close this room to the public.");
-    if (this.phase !== "LOBBY" || this.quickPlayConfig || this.roomMode !== "STANDARD") {
-      throw new Error("Only a standard private room in its pre-match lobby can be opened to the public.");
+    if (this.phase !== "LOBBY" || this.quickPlayConfig) {
+      throw new Error("Only a private room in its pre-match lobby can be opened to the public.");
     }
     if (isPublic && this.players.size >= this.maxClients) throw new Error("This room is full and cannot be opened to new players.");
     this.isPublic = isPublic;
