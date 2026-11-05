@@ -534,6 +534,13 @@ describe("M3 lobby and multiplayer arena", () => {
 
     const raider = [...serverPlayers.values()].find((player) => player.teamId === "BLUE" && player.status === "ACTIVE" && player.id !== pickupPlayer.id)!;
     raider.x = TEAM_BASES.RED.x + 80; raider.y = TEAM_BASES.RED.y + 100; raider.points = 1_000;
+    redPlayer.x = TEAM_BASES.RED.x + 300; redPlayer.y = TEAM_BASES.RED.y + 300; redPlayer.status = "ACTIVE";
+    expect(() => gameplayRoom.setInteraction(raider, true)).toThrow("The enemy base is occupied");
+    expect(gameplayRoom.activeRaids.BLUE).toBeUndefined();
+    for (const [index, defender] of [...serverPlayers.values()].filter((player) => player.teamId === "RED").entries()) {
+      defender.x = 4_000 + index * 100;
+      defender.y = 550;
+    }
     const raiderSessionId = [...serverPlayers.entries()].find(([, player]) => player.id === raider.id)?.[0];
     const raiderClient = clients.find((client) => client.sessionId === raiderSessionId)!;
     const redRaidEvents: GameEvent[] = [];
@@ -541,9 +548,24 @@ describe("M3 lobby and multiplayer arena", () => {
       const parsed = gameEventSchema.safeParse(payload);
       if (parsed.success && parsed.data.type === "raidFeedback") redRaidEvents.push(parsed.data);
     });
-    const raidStartedFeedback = nextGameEvent(raiderClient as unknown as SnapshotClient,
+    const firstRaidStartedFeedback = nextGameEvent(raiderClient as unknown as SnapshotClient,
       (event) => event.type === "raidFeedback" && event.stage === "STARTED");
     const beforeRaid = raider.points;
+    gameplayRoom.setInteraction(raider, true);
+    expect((await firstRaidStartedFeedback).type).toBe("raidFeedback");
+    const firstRaidStartedAt = gameplayRoom.activeRaids.BLUE!.startedAt;
+    const raidInterruptedFeedback = nextGameEvent(raiderClient as unknown as SnapshotClient,
+      (event) => event.type === "raidFeedback" && event.stage === "INTERRUPTED");
+    redPlayer.x = TEAM_BASES.RED.x + 300; redPlayer.y = TEAM_BASES.RED.y + 300;
+    gameplayRoom.advanceRaids(firstRaidStartedAt + 1_000);
+    expect((await raidInterruptedFeedback).type).toBe("raidFeedback");
+    expect(raider.points).toBe(beforeRaid);
+    expect(gameplayRoom.raidCooldownUntil.BLUE).toBe(0);
+    expect(gameplayRoom.activeRaids.BLUE).toBeUndefined();
+
+    redPlayer.x = 4_500; redPlayer.y = 550;
+    const raidStartedFeedback = nextGameEvent(raiderClient as unknown as SnapshotClient,
+      (event) => event.type === "raidFeedback" && event.stage === "STARTED");
     gameplayRoom.setInteraction(raider, true);
     expect((await raidStartedFeedback).type).toBe("raidFeedback");
     const raidCompletedFeedback = nextGameEvent(raiderClient as unknown as SnapshotClient,
@@ -582,7 +604,8 @@ describe("M3 lobby and multiplayer arena", () => {
     defender.status = "ACTIVE"; defender.points = 500;
     gameplayRoom.activeContactPairs.clear();
     const defenderPoints = defender.points;
-    gameplayRoom.setInteraction(redTeammate, true);
+    expect(() => gameplayRoom.setInteraction(redTeammate, true)).toThrow("The enemy base is occupied");
+    expect(gameplayRoom.activeRaids.RED).toBeUndefined();
     gameplayRoom.resolveContacts();
     expect(redTeammate.status).toBe("INACTIVE");
     expect(defender.status).toBe("ELIMINATED");
