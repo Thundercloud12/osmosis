@@ -40,7 +40,24 @@ docker compose up --build
 
 Open `http://localhost:5173`. The game server is on port `2567`; set `VITE_GAME_SERVER_URL` at build time when the browser must reach it at a different address. Copy `.env.example` to `.env` and set a persistent `RECONNECT_SECRET` and `METRICS_TOKEN` for containerized runs. The web image uses Vite's preview server for local/containerized play; use a static hosting service for a public production deployment.
 
-For the single-instance EC2 deployment, follow [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md) and the detailed [infrastructure guide](./infra/README.md). `infra/` is the only active production Terraform root. The browser connects directly to the EC2 Elastic IP through Caddy; Cloudflare DNS is DNS-only for the backend. It uses a separate production Compose file and leaves the local `compose.yaml` flow unchanged.
+## Production deployment
+
+The frontend is hosted as static files on Cloudflare. The game server runs in Docker Compose on one EC2 instance; Caddy handles HTTPS/WSS and forwards game traffic to Colyseus. Relevant pushes to `main` build and publish an immutable server image, then deploy it to EC2 through AWS Systems Manager.
+
+```mermaid
+flowchart LR
+  DEV[Push to main] --> CI[GitHub Actions<br/>typecheck · test · build]
+  CI --> ECR[ECR<br/>immutable server image]
+  ECR --> SSM[AWS Systems Manager]
+  SSM --> EC2[EC2<br/>Docker Compose + Colyseus]
+  BROWSER[Players] --> CADDY[Caddy<br/>HTTPS / WSS]
+  CADDY --> EC2
+  WEB[Static frontend] --> CF[Cloudflare hosting]
+  CF --> BROWSER
+  BROWSER -. voice .-> LK[LiveKit]
+```
+
+Frontend-only changes publish independently. Infrastructure changes use the separate, manually approved Terraform plan/apply workflows. See [the deployment guide](./docs/DEPLOYMENT.md) and [infrastructure guide](./infra/README.md) for setup and rollback steps.
 
 To capture movement diagnostics while testing, append `?movementDebug=1` to the match URL. The browser stores up to 10,000 input, snapshot and frame records in `window.__osmosisMovementTrace` for inspection or comparison between local and production-endpoint sessions.
 
