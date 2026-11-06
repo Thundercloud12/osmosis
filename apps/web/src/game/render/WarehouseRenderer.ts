@@ -22,6 +22,15 @@ export class WarehouseRenderer {
     for (const zone of WAREHOUSE_ZONES) zoneWashes.fillStyle(zone.tint, 0.12).fillRect(zone.x, zone.y, zone.width, zone.height);
 
     const floorDetails = this.scene.add.graphics().setDepth(-8);
+    // A central compass and painted lane markings give players fixed landmarks.
+    floorDetails.fillStyle(0x23384c, 0.3).fillRoundedRect(4_800, 2_160, 1_632, 1_152, 80);
+    floorDetails.lineStyle(18, 0xf8d879, 0.85).strokeRoundedRect(4_800, 2_160, 1_632, 1_152, 80);
+    floorDetails.lineStyle(10, 0xf8d879, 0.65).strokeCircle(5_616, 2_688, 360);
+    floorDetails.lineBetween(5_616, 2_256, 5_616, 3_120);
+    floorDetails.lineBetween(5_184, 2_688, 6_048, 2_688);
+    for (const x of [4_464, 6_672]) {
+      for (let i = 0; i < 4; i += 1) floorDetails.fillStyle(0xf8d879, 0.8).fillRect(x + i * 72, 3_120, 36, 96);
+    }
     for (const zone of WAREHOUSE_ZONES) {
       this.scene.add.text(zone.x + zone.width / 2, zone.y + 28, zone.label, {
         color: "#fff4d7", fontFamily: "Trebuchet MS, sans-serif", fontSize: "32px", fontStyle: "bold",
@@ -31,8 +40,10 @@ export class WarehouseRenderer {
 
     const tunnelDetails = this.scene.add.graphics().setDepth(-8);
     for (const tunnel of WAREHOUSE_TUNNELS) {
-      tunnelDetails.fillStyle(0xffe6a5, 0.12).fillRect(tunnel.x, tunnel.y, tunnel.width, tunnel.height);
-      tunnelDetails.lineStyle(8, 0xf4c44f, 0.8);
+      const flank = tunnel.id.includes("-north") || tunnel.id.includes("-south");
+      const routeColor = tunnel.id.includes("-north") ? 0x62d6df : tunnel.id.includes("-south") ? 0xe5a66f : 0xf4c44f;
+      tunnelDetails.fillStyle(routeColor, flank ? 0.22 : 0.12).fillRect(tunnel.x, tunnel.y, tunnel.width, tunnel.height);
+      tunnelDetails.lineStyle(8, routeColor, 0.8);
       if (tunnel.width > tunnel.height) {
         tunnelDetails.lineBetween(tunnel.x, tunnel.y + 36, tunnel.x + tunnel.width, tunnel.y + 36);
         tunnelDetails.lineBetween(tunnel.x, tunnel.y + tunnel.height - 36, tunnel.x + tunnel.width, tunnel.y + tunnel.height - 36);
@@ -40,6 +51,20 @@ export class WarehouseRenderer {
         tunnelDetails.lineBetween(tunnel.x + 36, tunnel.y, tunnel.x + 36, tunnel.y + tunnel.height);
         tunnelDetails.lineBetween(tunnel.x + tunnel.width - 36, tunnel.y, tunnel.x + tunnel.width - 36, tunnel.y + tunnel.height);
       }
+    }
+
+    // Large floor markings make the attack lanes identifiable under fog.
+    const laneLabels = [
+      { x: 1_400, y: 1_008, text: "NORTH / FLANK", color: "#a6f4f2" },
+      { x: 1_400, y: 4_368, text: "SOUTH / FLANK", color: "#ffd3a0" },
+      { x: 9_850, y: 1_008, text: "NORTH / FLANK", color: "#a6f4f2" },
+      { x: 10_100, y: 4_368, text: "SOUTH / FLANK", color: "#ffd3a0" },
+    ];
+    for (const lane of laneLabels) {
+      this.scene.add.text(lane.x, lane.y, lane.text, {
+        color: lane.color, fontFamily: "Trebuchet MS, sans-serif", fontSize: "32px",
+        fontStyle: "bold", stroke: "#253442", strokeThickness: 6,
+      }).setOrigin(0.5).setAlpha(0.85).setDepth(-7);
     }
 
     this.drawWarehouseObstacles();

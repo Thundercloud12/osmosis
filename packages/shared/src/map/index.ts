@@ -66,7 +66,7 @@ interface RoomDoor {
 
 const DOOR_WIDTH = 288;
 const ROOM_DOORS: Readonly<Record<string, readonly RoomDoor[]>> = {
-  "blue-hq": [{ side: "east", center: 2_688, width: DOOR_WIDTH }],
+  "blue-hq": [{ side: "east", center: 2_688, width: DOOR_WIDTH }, { side: "north", center: 624, width: DOOR_WIDTH }, { side: "south", center: 624, width: DOOR_WIDTH }],
   receiving: [
     { side: "north", center: 2_784, width: DOOR_WIDTH },
     { side: "west", center: 2_688, width: DOOR_WIDTH },
@@ -74,6 +74,8 @@ const ROOM_DOORS: Readonly<Record<string, readonly RoomDoor[]>> = {
     { side: "south", center: 2_784, width: DOOR_WIDTH },
   ],
   "north-docks": [
+    { side: "west", center: 1_008, width: DOOR_WIDTH },
+    { side: "east", center: 1_008, width: DOOR_WIDTH },
     { side: "south", center: 2_784, width: DOOR_WIDTH },
     { side: "south", center: 5_616, width: DOOR_WIDTH },
     { side: "south", center: 8_400, width: DOOR_WIDTH },
@@ -90,8 +92,9 @@ const ROOM_DOORS: Readonly<Record<string, readonly RoomDoor[]>> = {
     { side: "east", center: 2_688, width: DOOR_WIDTH },
     { side: "south", center: 8_784, width: DOOR_WIDTH },
   ],
-  "red-hq": [{ side: "west", center: 2_688, width: DOOR_WIDTH }],
+  "red-hq": [{ side: "west", center: 2_688, width: DOOR_WIDTH }, { side: "north", center: 10_608, width: DOOR_WIDTH }, { side: "south", center: 10_608, width: DOOR_WIDTH }],
   maintenance: [
+    { side: "west", center: 4_368, width: DOOR_WIDTH },
     { side: "north", center: 2_784, width: DOOR_WIDTH },
     { side: "east", center: 4_368, width: DOOR_WIDTH },
   ],
@@ -105,6 +108,7 @@ const ROOM_DOORS: Readonly<Record<string, readonly RoomDoor[]>> = {
     { side: "east", center: 4_368, width: DOOR_WIDTH },
   ],
   storage: [
+    { side: "east", center: 4_368, width: DOOR_WIDTH },
     { side: "north", center: 8_784, width: DOOR_WIDTH },
     { side: "west", center: 4_368, width: DOOR_WIDTH },
   ],
@@ -156,9 +160,17 @@ function roomBoundaryWalls(room: WarehouseZone): Rectangle[] {
 /** Wide floor corridors join the enclosed rooms; each matches its door openings. */
 export const WAREHOUSE_TUNNELS: readonly Rectangle[] = [
   { id: "tunnel-blue-receiving", x: 1_056, y: 2_544, width: 1_008, height: DOOR_WIDTH },
+  { id: "flank-blue-north-vertical", x: 480, y: 864, width: 288, height: 1_248 },
+  { id: "flank-blue-north-horizontal", x: 480, y: 864, width: 1_584, height: 288 },
+  { id: "flank-blue-south-vertical", x: 480, y: 3_264, width: 288, height: 1_248 },
+  { id: "flank-blue-south-horizontal", x: 480, y: 4_224, width: 1_584, height: 288 },
   { id: "tunnel-receiving-sorting", x: 3_504, y: 2_544, width: 624, height: DOOR_WIDTH },
   { id: "tunnel-sorting-dispatch", x: 7_104, y: 2_544, width: 576, height: DOOR_WIDTH },
   { id: "tunnel-dispatch-red", x: 9_120, y: 2_544, width: 1_056, height: DOOR_WIDTH },
+  { id: "flank-red-north-vertical", x: 10_464, y: 864, width: 288, height: 1_248 },
+  { id: "flank-red-north-horizontal", x: 9_120, y: 864, width: 1_632, height: 288 },
+  { id: "flank-red-south-vertical", x: 10_464, y: 3_264, width: 288, height: 1_248 },
+  { id: "flank-red-south-horizontal", x: 9_696, y: 4_224, width: 1_056, height: 288 },
   { id: "tunnel-north-receiving", x: 2_640, y: 1_632, width: DOOR_WIDTH, height: 288 },
   { id: "tunnel-north-sorting", x: 5_472, y: 1_632, width: DOOR_WIDTH, height: 288 },
   { id: "tunnel-north-dispatch", x: 8_256, y: 1_632, width: DOOR_WIDTH, height: 288 },
@@ -170,7 +182,7 @@ export const WAREHOUSE_TUNNELS: readonly Rectangle[] = [
   { id: "tunnel-dispatch-storage", x: 8_640, y: 3_360, width: DOOR_WIDTH, height: 432 },
 ];
 
-const TUNNEL_WALLS: readonly Rectangle[] = WAREHOUSE_TUNNELS.flatMap((tunnel) => {
+const TUNNEL_WALLS: readonly Rectangle[] = WAREHOUSE_TUNNELS.filter((tunnel) => !tunnel.id.startsWith("flank-")).flatMap((tunnel) => {
   const thickness = 96;
   if (tunnel.width > tunnel.height) return [
     { id: `wall-${tunnel.id}-north`, x: tunnel.x, y: tunnel.y - thickness, width: tunnel.width, height: thickness },
@@ -253,19 +265,36 @@ const AUTHORED_ARENA_OBSTACLES: readonly Rectangle[] = [
   { id: "sorter-island", x: 4_512, y: 2_304, width: 192, height: 288 },
   { id: "sorter-west-table", x: 3_360, y: 2_592, width: 192, height: 144 },
   { id: "sorter-east-table", x: 5_664, y: 2_592, width: 192, height: 144 },
+  // Short staggered cover creates opportunities to approach and disengage in the central hall.
+  { id: "sorter-cover-west", x: 3_840, y: 2_784, width: 144, height: 144 },
+  { id: "sorter-cover-east", x: 5_088, y: 2_784, width: 144, height: 144 },
   // Maintenance and packing equipment; door gaps remain between each obstacle group.
   { id: "maintenance-generator", x: 1_632, y: 4_128, width: 192, height: 192 },
   { id: "maintenance-cabinets", x: 1_344, y: 4_080, width: 96, height: 384 },
   { id: "packing-line-west", x: 5_664, y: 4_032, width: 672, height: 96 },
   { id: "packing-line-east", x: 5_904, y: 4_608, width: 576, height: 96 },
   // Modular rack aisles sit entirely inside the enclosed south storage room.
-  ...[7_392, 8_016, 8_496].flatMap((x, column) => [
-    { id: `rack-${column + 1}-north`, x, y: 4_032, width: 96, height: 432 },
-    { id: `rack-${column + 1}-south`, x, y: 4_656, width: 96, height: 336 },
-  ]),
+  { id: "rack-2-north", x: 8_016, y: 4_032, width: 96, height: 432 },
+  { id: "rack-2-south", x: 8_016, y: 4_656, width: 96, height: 336 },
 ] as const;
 export const ARENA_OBSTACLES: readonly Rectangle[] = [
   ...offsetX(AUTHORED_ARENA_OBSTACLES, CORE_APPROACH_OFFSET_X),
+  // Walls outline the service passages while leaving their corners open.
+  ...[
+    { id: "blue-north-top", x: 384, y: 768, width: 1_680, height: 96 },
+    { id: "blue-north-bottom", x: 768, y: 1_152, width: 1_296, height: 96 },
+    { id: "blue-north-outer", x: 384, y: 864, width: 96, height: 1_248 },
+    { id: "blue-north-inner", x: 768, y: 1_152, width: 96, height: 960 },
+    { id: "blue-south-top", x: 768, y: 4_128, width: 1_296, height: 96 },
+    { id: "blue-south-bottom", x: 384, y: 4_512, width: 1_680, height: 96 },
+    { id: "blue-south-outer", x: 384, y: 3_264, width: 96, height: 1_248 },
+    { id: "blue-south-inner", x: 768, y: 3_264, width: 96, height: 960 },
+  ].flatMap((wall) => [
+    { ...wall, id: `wall-service-${wall.id}` },
+    { ...wall, id: `wall-service-${wall.id.replace("blue", "red")}`,
+      x: ARENA_CONFIG.width - wall.x - wall.width + (wall.id === "blue-south-top" || wall.id === "blue-south-bottom" ? 528 : 0),
+      width: wall.width - (wall.id === "blue-south-top" || wall.id === "blue-south-bottom" ? 528 : 0) },
+  ]),
   ...ROOM_WALLS,
   ...HORIZONTAL_CONNECTOR_WALLS,
   ...VERTICAL_CONNECTOR_WALLS,
@@ -299,10 +328,8 @@ const AUTHORED_WAREHOUSE_PROPS: readonly WarehouseProp[] = [
   { id: "maintenance-console", x: 1_296, y: 4_416, frame: 90, width: 96, height: 96 },
   { id: "packing-crate-west", x: 5_568, y: 3_840, frame: 75, width: 96, height: 96 },
   { id: "packing-crate-east", x: 6_384, y: 4_512, frame: 87, width: 96, height: 96 },
-  ...[7_392, 8_016, 8_496].flatMap((x, column) => [
-    { id: `rack-${column + 1}-upper`, x, y: 4_032, frame: 84, width: 96, height: 432 },
-    { id: `rack-${column + 1}-lower`, x, y: 4_656, frame: 84, width: 96, height: 336 },
-  ]),
+  { id: "rack-2-upper", x: 8_016, y: 4_032, frame: 84, width: 96, height: 432 },
+  { id: "rack-2-lower", x: 8_016, y: 4_656, frame: 84, width: 96, height: 336 },
   { id: "storage-pallet-west", x: 7_584, y: 4_800, frame: 73, width: 96, height: 96 },
   { id: "storage-pallet-east", x: 8_280, y: 4_800, frame: 85, width: 96, height: 96 },
 ] as const;
@@ -313,6 +340,8 @@ const AUTHORED_PICKUP_CANDIDATES: readonly Point[] = [
   { x: 1_248, y: 2_688 }, { x: 2_880, y: 2_880 }, { x: 3_312, y: 2_352 }, { x: 5_904, y: 2_832 }, { x: 6_768, y: 2_688 }, { x: 7_968, y: 2_688 },
   { x: 1_248, y: 4_608 }, { x: 2_352, y: 4_512 }, { x: 3_072, y: 4_512 }, { x: 4_608, y: 4_512 }, { x: 6_144, y: 4_512 }, { x: 7_968, y: 4_608 },
   { x: 3_072, y: 1_536 }, { x: 6_144, y: 1_536 }, { x: 3_072, y: 3_168 }, { x: 6_144, y: 3_168 },
+  { x: 4_080, y: 2_688 }, { x: 4_320, y: 2_880 }, { x: 4_800, y: 2_880 }, { x: 5_040, y: 2_688 },
+  { x: 4_080, y: 3_072 }, { x: 5_040, y: 3_072 },
 ];
 export const PICKUP_CANDIDATES: readonly Point[] = offsetX(AUTHORED_PICKUP_CANDIDATES, CORE_APPROACH_OFFSET_X);
 
@@ -340,7 +369,14 @@ export function generatePickupLocations(seed: number, count = 12): Array<Point &
     const swapIndex = Math.floor(random() * (index + 1));
     [candidates[index], candidates[swapIndex]] = [candidates[swapIndex]!, candidates[index]!];
   }
-  return candidates.slice(0, Math.min(count, candidates.length)).map((point, index) => ({
+  // Seeded variety with a dependable incentive to visit the contested sorting hall.
+  const central = candidates.filter((point) => point.x >= 4_800 && point.x <= 6_432 && point.y >= 2_160 && point.y <= 3_216);
+  const selected = central.slice(0, Math.min(4, count));
+  for (const point of candidates) {
+    if (selected.length >= count) break;
+    if (!selected.includes(point)) selected.push(point);
+  }
+  return selected.map((point, index) => ({
     ...point,
     id: `pickup-${String(index + 1).padStart(2, "0")}`,
   }));

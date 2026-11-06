@@ -3,7 +3,7 @@ import { stepMovement } from "./index";
 
 describe("canonical movement step", () => {
   it("uses constant speed for diagonal movement", () => {
-    const start = { x: 800, y: 1_800 };
+    const start = { x: 1_500, y: 300 };
     const end = stepMovement(start, { dx: 1, dy: 1 }, 0.05);
     expect(Math.hypot(end.x - start.x, end.y - start.y)).toBeCloseTo(13);
   });
