@@ -2,13 +2,11 @@ import type { RoomSnapshot } from "@osmosis/shared";
 
 interface ResultsScreenProps {
   result: NonNullable<RoomSnapshot["result"]>;
-  isHost: boolean;
   error: string | undefined;
-  onRematch: () => void;
   onLeave: () => void;
 }
 
-export function ResultsScreen({ result, isHost, error, onRematch, onLeave }: ResultsScreenProps) {
+export function ResultsScreen({ result, error, onLeave }: ResultsScreenProps) {
   const blueWon = result.winnerTeam === "BLUE";
   const redWon = result.winnerTeam === "RED";
   return <main className="lobby-shell results-shell">
@@ -34,7 +32,7 @@ export function ResultsScreen({ result, isHost, error, onRematch, onLeave }: Res
         </section>)}
       </div>
       {error && <p className="lobby-error" role="alert">{error}</p>}
-      {isHost ? <button className="play-button result-rematch" onClick={onRematch}>REMATCH <span>↻</span></button> : <p className="rematch-note">Waiting for the host to start a rematch…</p>}
+      <p className="results-next-step">Return to Crew Up to create or join another match.</p>
     </section>
   </main>;
 }

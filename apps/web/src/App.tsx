@@ -19,7 +19,6 @@ export function App() {
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
   const [matchmakingSnapshot, setMatchmakingSnapshot] = useState<MatchmakingSnapshot | null>(null);
   const [matchmakingActive, setMatchmakingActive] = useState(false);
-  const [reportNotice, setReportNotice] = useState<string>();
   const autoJoinStarted = useRef(false);
   const errorTimer = useRef<number | undefined>(undefined);
 
@@ -56,11 +55,6 @@ export function App() {
     setMatchmakingActive(false);
     setMatchmakingSnapshot(null);
   }, []);
-  const receiveReportAccepted = useCallback((message: string) => {
-    setReportNotice(message);
-    window.setTimeout(() => setReportNotice(undefined), 3_500);
-  }, []);
-
   useEffect(() => {
     const unsubscribeLobby = network.onLobbySnapshot(receiveLobbySnapshot);
     const unsubscribeStatus = network.onStatus(receiveNetworkStatus);
@@ -68,7 +62,6 @@ export function App() {
     const unsubscribeRoom = network.onSnapshot(receiveRoomSnapshot);
     const unsubscribeMatchmaking = network.onMatchmakingSnapshot(receiveMatchmakingSnapshot);
     const unsubscribeMatchmakingClosed = network.onMatchmakingClosed(receiveMatchmakingClosed);
-    const unsubscribeReport = network.onReportAccepted(receiveReportAccepted);
     return () => {
       unsubscribeLobby();
       unsubscribeStatus();
@@ -76,10 +69,9 @@ export function App() {
       unsubscribeRoom();
       unsubscribeMatchmaking();
       unsubscribeMatchmakingClosed();
-      unsubscribeReport();
       if (errorTimer.current !== undefined) window.clearTimeout(errorTimer.current);
     };
-  }, [network, receiveCommandError, receiveLobbySnapshot, receiveNetworkStatus, receiveRoomSnapshot, receiveMatchmakingSnapshot, receiveMatchmakingClosed, receiveReportAccepted]);
+  }, [network, receiveCommandError, receiveLobbySnapshot, receiveNetworkStatus, receiveRoomSnapshot, receiveMatchmakingSnapshot, receiveMatchmakingClosed]);
 
   useEffect(() => {
     const roomCode = new URLSearchParams(window.location.search).get("room");
@@ -179,12 +171,9 @@ export function App() {
       onCommand={(command: MatchmakingCommand) => { setError(undefined); network.sendMatchmakingCommand(command); }}
       onLeave={() => { void network.leaveMatchmaking(); setMatchmakingActive(false); setMatchmakingSnapshot(null); window.history.replaceState(null, "", window.location.pathname); }} />;
   } else if (roomSnapshot?.phase === "RESULTS" && roomSnapshot.result) {
-    const fallbackHost = lobby?.players.find((player) => player.id === lobby.selfPlayerId)?.isHost ?? false;
-    const isHost = roomSnapshot.hostPlayerId ? roomSnapshot.hostPlayerId === roomSnapshot.selfPlayerId : fallbackHost;
-    screen = <ResultsScreen result={roomSnapshot.result} isHost={isHost} error={error}
-      onRematch={() => network.sendCommand({ type: "rematch" })} onLeave={leaveRoom} />;
+    screen = <ResultsScreen result={roomSnapshot.result} error={error} onLeave={leaveRoom} />;
   } else if (lobby?.phase === "PLAYING" || roomSnapshot?.phase === "PLAYING") {
-    screen = <ArenaCanvas network={network} snapshot={roomSnapshot} error={error} reportNotice={reportNotice} onLeave={() => void leaveRoom()} onNetworkStatus={receiveNetworkStatus} networkStatus={networkStatus} />;
+    screen = <ArenaCanvas network={network} snapshot={roomSnapshot} error={error} onLeave={() => void leaveRoom()} onNetworkStatus={receiveNetworkStatus} networkStatus={networkStatus} />;
   } else screen = (
     <LobbyScreen
       lobby={lobby}

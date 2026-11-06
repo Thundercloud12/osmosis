@@ -12,7 +12,7 @@ These items require new or changed product/code behavior.
 | Priority | Work | Notes |
 |---|---|---|
 | Next | Add network-quality feedback | Give players a clear indication when their connection is degraded or reconnecting. |
-| Launch | Add privacy notice and abuse-reporting path | Disclose the hosted voice provider and provide a reporting path before public matchmaking. Consider in-game mute/report controls as part of that flow. |
+| Launch | Add privacy notice and player-safety instructions | Disclose the hosted voice provider and define how players can raise conduct concerns before public matchmaking. In-game player reporting has been removed. |
 | Operations | Prepare persistent hosting and monitoring | Keep the single direct-to-EC2 Node/Colyseus deployment for v1; add graceful shutdown and extend the private runtime stats with the remaining operational signals before wider public use. |
 
 ## 2. Verification work
@@ -21,7 +21,7 @@ These items test behavior that is already implemented or confirm quality on real
 
 | Priority | Scenario | Evidence still needed |
 |---|---|---|
-| Next | Public direct-endpoint reconnect and rematch | Repeat reconnect and rematch through the production DNS-only EC2 hostname, including browser closure, and confirm the same seat/state returns without a duplicate. |
+| Next | Public direct-endpoint reconnect | Repeat reconnect through the production DNS-only EC2 hostname, including browser closure, and confirm the same seat/state returns without a duplicate. |
 | Next | Natural browser gameplay edge cases | Use real browser clients to verify contested star pickups, ordinary collisions inside HQ, pole-holder contact, and simultaneous contact. Existing unit and room tests cover core rule resolution; this checks the full client/server experience. |
 | Next | Ten-player fairness and performance | Run a full 5v5 match under latency/loss impairment and assess fairness, the 20 Hz server tick, movement corrections, and client rendering over a longer session. |
 | Polish | Movement and camera stability | Run longer seeded movement routes and capture movement traces under jitter; compare authoritative, predicted, and rendered positions and review camera smoothness. |
@@ -42,4 +42,4 @@ Reduced-motion support for Phaser feedback is deferred. The tutorial page turn a
 2. Close the public-endpoint and natural-browser gameplay verification gaps.
 3. Run ten-player testing under network impairment and review movement traces.
 4. Finish real-microphone checks.
-5. Complete privacy, reporting, and persistent-hosting preparation before public matchmaking.
+5. Complete privacy, player-safety and persistent-hosting preparation before public matchmaking.

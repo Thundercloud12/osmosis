@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Client, type Room } from "@colyseus/sdk";
 import {
   ARENA_OBSTACLES,
@@ -54,7 +54,6 @@ interface MutableArenaRoom {
   advanceRaids(now: number): void;
   finishMatch(): void;
   simulate(dt: number): void;
-  rematch(player: MutablePlayer): void;
   reconcilePoleHolders(): void;
   sendSnapshots(): void;
 }
@@ -106,19 +105,6 @@ function nextCommandError(client: SnapshotClient): Promise<string> {
       clearTimeout(timeout);
       unsubscribe();
       resolve(payload.message);
-    });
-  });
-}
-
-function nextReportAccepted(client: SnapshotClient): Promise<{ targetPlayerId: string; message: string }> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => { unsubscribe(); reject(new Error("Timed out waiting for report acceptance")); }, 3_000);
-    const unsubscribe = client.onMessage<unknown>("reportAccepted", (payload) => {
-      if (typeof payload !== "object" || payload === null || !("targetPlayerId" in payload)
-        || typeof payload.targetPlayerId !== "string" || !("message" in payload) || typeof payload.message !== "string") return;
-      clearTimeout(timeout);
-      unsubscribe();
-      resolve({ targetPlayerId: payload.targetPlayerId, message: payload.message });
     });
   });
 }
@@ -668,14 +654,6 @@ describe("M3 lobby and multiplayer arena", () => {
       expect(resultSnapshot.result!.teamScores[teamId]).toBe(playerTotal);
     }
     expect(resultSnapshot.teamScores.BLUE).toBeGreaterThan(0);
-    const hostState = gameplayRoom.players.get(host.sessionId)!;
-    const rematchLobby = lobbyUntil(host as unknown as SnapshotClient, (snapshot) => snapshot.phase === "LOBBY" && !snapshot.allocationComplete);
-    gameplayRoom.rematch(hostState);
-    await rematchLobby;
-    expect(hostState.points).toBe(0);
-    expect(hostState.startingPoints).toBeUndefined();
-    expect(hostState.x).toBe(TEAM_BASES[hostState.teamId].x + TEAM_BASES[hostState.teamId].width / 2);
-
     await playingSnapshotPromise;
     await Promise.all(clients.map((client) => client.leave()));
   }, 30_000);
@@ -705,7 +683,6 @@ describe("M3 lobby and multiplayer arena", () => {
         matchDeadline: number | undefined;
         startMatch(): void;
         finishMatch(): void;
-        rematch(player: { id: string }): void;
       };
       for (let index = 1; index < 8; index += 1) {
         clients.push(await gameClient.joinById(room.roomId, { nickname: `4v4 Player ${index + 1}` }));
@@ -739,10 +716,6 @@ describe("M3 lobby and multiplayer arena", () => {
       internals.finishMatch();
       const resultSnapshot = await resultPromise;
       expect(resultSnapshot.result?.matchSettings).toEqual({ teamSize: 4, matchDurationSeconds: 600 });
-      const hostState = internals.players.get(first.sessionId)!;
-      const rematchPromise = lobbyUntil(clients[0] as unknown as SnapshotClient, (snapshot) => snapshot.phase === "LOBBY");
-      internals.rematch(hostState);
-      expect((await rematchPromise).matchSettings).toEqual({ teamSize: 4, matchDurationSeconds: 600 });
     } finally {
       await Promise.all(clients.map((client) => client.leave()));
     }
@@ -819,52 +792,4 @@ describe("M3 lobby and multiplayer arena", () => {
     }
   }, 20_000);
 
-  it("rejects invalid and duplicate abuse reports and limits each player to three reports per match", async () => {
-    const clients: Room[] = [];
-    const reportLog = vi.spyOn(console, "info").mockImplementation(() => undefined);
-    try {
-      const first = await gameClient.create("arena", { nickname: "Reporting Crew" });
-      clients.push(first);
-      const room = matchMaker.getLocalRoomById(first.roomId) as ArenaRoom;
-      for (let index = 1; index < 5; index += 1) {
-        clients.push(await gameClient.joinById(room.roomId, { nickname: `Reported Crew ${index}` }));
-      }
-      const internals = room as unknown as { players: Map<string, MutablePlayer>; phase: string };
-      internals.phase = "PLAYING";
-      const reporter = internals.players.get(first.sessionId)!;
-      const targets = clients.slice(1).map((client) => internals.players.get(client.sessionId)!.id);
-      const reporterClient = first as unknown as SnapshotClient;
-
-      const selfError = nextCommandError(reporterClient);
-      first.send("command", { type: "reportPlayer", targetPlayerId: reporter.id, category: "OTHER" });
-      expect(await selfError).toContain("report yourself");
-
-      const unknownError = nextCommandError(reporterClient);
-      first.send("command", { type: "reportPlayer", targetPlayerId: "missing-player", category: "CHEATING" });
-      expect(await unknownError).toContain("no longer in this match");
-
-      const acceptedFirst = nextReportAccepted(reporterClient);
-      first.send("command", { type: "reportPlayer", targetPlayerId: targets[0], category: "HARASSMENT" });
-      expect(await acceptedFirst).toMatchObject({ targetPlayerId: targets[0] });
-      const structuredReport = JSON.parse(String(reportLog.mock.calls[0]?.[0])) as { event: string; category: string };
-      expect(structuredReport).toMatchObject({ event: "osmosis.abuse_report", category: "HARASSMENT" });
-
-      const duplicateError = nextCommandError(reporterClient);
-      first.send("command", { type: "reportPlayer", targetPlayerId: targets[0], category: "OTHER" });
-      expect(await duplicateError).toContain("already reported");
-
-      for (const targetId of targets.slice(1, 3)) {
-        const accepted = nextReportAccepted(reporterClient);
-        first.send("command", { type: "reportPlayer", targetPlayerId: targetId, category: "OTHER" });
-        await expect(accepted).resolves.toMatchObject({ targetPlayerId: targetId });
-      }
-
-      const limitError = nextCommandError(reporterClient);
-      first.send("command", { type: "reportPlayer", targetPlayerId: targets[3], category: "CHEATING" });
-      expect(await limitError).toContain("maximum number of reports");
-    } finally {
-      reportLog.mockRestore();
-      await Promise.all(clients.map((client) => client.leave()));
-    }
-  }, 15_000);
 });

@@ -50,7 +50,6 @@ export class MultiplayerClient {
   private readonly errorListeners = new Set<(message: string) => void>();
   private readonly matchmakingListeners = new Set<(snapshot: MatchmakingSnapshot) => void>();
   private readonly matchmakingClosedListeners = new Set<() => void>();
-  private readonly reportListeners = new Set<(message: string) => void>();
   private readonly handoffsInProgress = new Set<string>();
   private readonly cancelledHandoffs = new Set<string>();
   private latestRoomSnapshot: RoomSnapshot | undefined;
@@ -106,11 +105,6 @@ export class MultiplayerClient {
   onMatchmakingClosed(listener: () => void): () => void {
     this.matchmakingClosedListeners.add(listener);
     return () => this.matchmakingClosedListeners.delete(listener);
-  }
-
-  onReportAccepted(listener: (message: string) => void): () => void {
-    this.reportListeners.add(listener);
-    return () => this.reportListeners.delete(listener);
   }
 
   async createRoom(nickname: string, roomMode: RoomMode = "STANDARD", matchSettings?: Partial<MatchSettings>): Promise<void> {
@@ -284,10 +278,6 @@ export class MultiplayerClient {
       if (typeof message === "string") {
         for (const listener of this.errorListeners) listener(message);
       }
-    });
-    room.onMessage("reportAccepted", (payload: unknown) => {
-      if (typeof payload !== "object" || payload === null || !("message" in payload) || typeof payload.message !== "string") return;
-      for (const listener of this.reportListeners) listener(payload.message);
     });
     room.onMessage("quickPlayCancelled", (payload: unknown) => {
       const message = typeof payload === "object" && payload !== null && "message" in payload && typeof payload.message === "string"

@@ -9,13 +9,12 @@ interface ArenaCanvasProps {
   network: MultiplayerClient;
   snapshot: RoomSnapshot | null;
   error: string | undefined;
-  reportNotice: string | undefined;
   onLeave: () => void;
   onNetworkStatus(status: NetworkStatus): void;
   networkStatus: NetworkStatus;
 }
 
-export function ArenaCanvas({ network, snapshot, error, reportNotice, onLeave, onNetworkStatus, networkStatus }: ArenaCanvasProps) {
+export function ArenaCanvas({ network, snapshot, error, onLeave, onNetworkStatus, networkStatus }: ArenaCanvasProps) {
   const mountRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -31,6 +30,6 @@ export function ArenaCanvas({ network, snapshot, error, reportNotice, onLeave, o
 
   return <div className="arena-screen">
     <div ref={mountRef} className="absolute inset-0" aria-label="Osmosis arena" />
-    <GameHud snapshot={snapshot} error={error} reportNotice={reportNotice} onCommand={(command) => network.sendCommand(command)} onLeave={onLeave} networkStatus={networkStatus} />
+    <GameHud snapshot={snapshot} error={error} onLeave={onLeave} networkStatus={networkStatus} />
   </div>;
 }

@@ -31,7 +31,7 @@ import { advanceRaids as advanceRaidsSystem, cancelRaid, setRaid, type ActiveRai
 import { eliminatePlayer as eliminatePlayerSystem, eliminatedTeamWinner, freezeMovement as freezeMovementSystem, makeInactive as makeInactiveSystem, rearmPlayers as rearmPlayersSystem, reconcilePoleHolders as reconcilePoleHoldersSystem } from "../systems/PlayerStatusSystem";
 import { projectSnapshot } from "../security/SnapshotProjector";
 import { runtimeMetrics } from "../observability/RuntimeMetrics";
-import { connectedPlayerCount as countConnectedPlayers, disconnectPlayer, oldestConnectedPlayerId, purgeDisconnectedPlayersForRematch, reconnectPlayer } from "../systems/PresenceSystem";
+import { connectedPlayerCount as countConnectedPlayers, disconnectPlayer, oldestConnectedPlayerId, reconnectPlayer } from "../systems/PresenceSystem";
 import { roomModeAllowed } from "./RoomModePolicy";
 import type { Pickup, ServerPlayer } from "./Player";
 import { verifyHandoffCredential, verifyQuickPlayRoomCredential, type QuickPlayHandoffClaims } from "../matchmaking/HandoffCredential";
@@ -43,7 +43,6 @@ type RoomPhase = "LOBBY" | "ALLOCATION" | "COUNTDOWN" | "PLAYING" | "RESULTS";
 const VOICE_CREDENTIAL_SECRET = process.env.RECONNECT_SECRET || randomBytes(32).toString("base64url");
 const VOICE_CREDENTIAL_TTL_SECONDS = 16 * 60;
 export const roomJoinLimiter = new WindowRateLimiter();
-const abuseReportLimiter = new WindowRateLimiter();
 
 function requireNickname(options: unknown): string {
   const requestedName = typeof options === "object" && options !== null && "nickname" in options
@@ -100,7 +99,6 @@ export class ArenaRoom extends Room {
   private readonly activeContactPairs = new Set<string>();
   private readonly helpPingExpiresAt = new Map<string, number>();
   private readonly helpPingCooldownUntil = new Map<string, number>();
-  private readonly reportedTargets = new Map<string, Set<string>>();
   private readonly poleHolders: PoleHolders = { BLUE: undefined, RED: undefined };
   private readonly activeRaids: Record<TeamId, ActiveRaid | undefined> = { BLUE: undefined, RED: undefined };
   private readonly raidCooldownUntil: Record<TeamId, number> = { BLUE: 0, RED: 0 };
@@ -372,11 +370,6 @@ export class ArenaRoom extends Room {
       client.send("commandError", { message: "That action could not be understood." });
       return;
     }
-    if (parsed.data.type === "reportPlayer") {
-      try { this.reportPlayer(client, player, parsed.data.targetPlayerId, parsed.data.category); }
-      catch (error) { client.send("commandError", { message: error instanceof Error ? error.message : "The report could not be submitted." }); }
-      return;
-    }
     try {
       if (this.phase === "PLAYING") {
         if (player.status === "ELIMINATED") throw new Error("Eliminated players are spectators for the rest of this round.");
@@ -391,9 +384,7 @@ export class ArenaRoom extends Room {
         return;
       }
       if (this.phase === "RESULTS") {
-        if (parsed.data.type !== "rematch") throw new Error("Only the host can request a rematch.");
-        this.rematch(player);
-        return;
+        throw new Error("The match has ended. Leave the room to start another match.");
       }
       switch (parsed.data.type) {
         case "chooseTeam": this.chooseTeam(player, parsed.data.teamId); break;
@@ -412,29 +403,6 @@ export class ArenaRoom extends Room {
       client.send("commandError", { message: error instanceof Error ? error.message : "That action was rejected." });
     }
     this.sendLobbySnapshots();
-  }
-
-  private reportPlayer(client: Client, reporter: ServerPlayer, targetPlayerId: string, category: "CHEATING" | "HARASSMENT" | "OTHER"): void {
-    if (this.phase !== "PLAYING" && this.phase !== "RESULTS") throw new Error("Player reports are available after a match begins.");
-    if (targetPlayerId === reporter.id) throw new Error("You can’t report yourself.");
-    const target = this.findById(targetPlayerId);
-    if (!target) throw new Error("That player is no longer in this match.");
-    const reportKey = `${this.roomId}:${this.roundNumber}:${reporter.id}`;
-    const targets = this.reportedTargets.get(reportKey) ?? new Set<string>();
-    if (targets.has(targetPlayerId)) throw new Error("You’ve already reported this player for this match.");
-    if (!abuseReportLimiter.allow(reportKey, 3, 15 * 60_000)) throw new Error("You’ve sent the maximum number of reports for this match.");
-    targets.add(targetPlayerId);
-    this.reportedTargets.set(reportKey, targets);
-    console.info(JSON.stringify({
-      event: "osmosis.abuse_report",
-      reportedAt: new Date().toISOString(),
-      roomCode: this.roomId,
-      round: this.roundNumber,
-      reporter: { id: reporter.id, nickname: reporter.nickname },
-      target: { id: target.id, nickname: target.nickname },
-      category,
-    }));
-    client.send("reportAccepted", { targetPlayerId, message: "Report received. Thanks for helping keep crews welcoming." });
   }
 
   private chooseTeam(player: ServerPlayer, teamId: TeamId): void {
@@ -846,42 +814,6 @@ export class ArenaRoom extends Room {
     }
     for (const player of this.players.values()) { player.dx = 0; player.dy = 0; }
     this.sendSnapshots();
-  }
-
-  private rematch(player: ServerPlayer): void {
-    if (player.id !== this.hostPlayerId) throw new Error("Only the host can start a rematch.");
-    this.phase = "LOBBY";
-    this.matchDeadline = undefined;
-    this.pickups = [];
-    this.helpPingExpiresAt.clear();
-    this.helpPingCooldownUntil.clear();
-    this.activeContactPairs.clear();
-    this.poleHolders.BLUE = undefined;
-    this.poleHolders.RED = undefined;
-    this.resultWinnerOverride = null;
-    this.activeRaids.BLUE = undefined; this.activeRaids.RED = undefined;
-    this.raidCooldownUntil.BLUE = 0; this.raidCooldownUntil.RED = 0;
-    this.allocationComplete = false;
-    this.allocationLocked.BLUE = false; this.allocationLocked.RED = false;
-    purgeDisconnectedPlayersForRematch(this.players, performance.now());
-    for (const teamId of ["BLUE", "RED"] as const) {
-      const captain = this.findById(this.captainIds[teamId] ?? "");
-      if (!captain?.connected) this.captainIds[teamId] = undefined;
-    }
-    if (!this.findById(this.hostPlayerId ?? "")?.connected) this.hostPlayerId = oldestConnectedPlayerId(this.players.values());
-    this.resetPositions();
-    for (const member of this.players.values()) {
-      if (member.connected) member.status = "ACTIVE";
-      else {
-        member.status = "DISCONNECTED";
-        member.statusBeforeDisconnect = "ACTIVE";
-      }
-      member.points = 0; member.startingPoints = undefined;
-      member.inactiveUntil = 0; member.frozenUntil = 0; member.lastSequence = -1; member.lastAppliedSequence = -1; member.pendingMoves.length = 0;
-      member.linkedPlayerId = undefined; member.ready = false; member.dx = 0; member.dy = 0;
-      member.pickupsCollected = 0; member.battlesWon = 0; member.raidsCompleted = 0;
-    }
-    this.sendLobbySnapshots();
   }
 
   private isInsideBase(player: ServerPlayer, base: { x: number; y: number; width: number; height: number }): boolean {

@@ -46,13 +46,7 @@ export const clientCommandSchema = z.discriminatedUnion("type", [
     teammateId: z.string().min(1).max(64),
   }),
   z.object({ type: z.literal("linkStop") }),
-  z.object({ type: z.literal("rematch") }),
   z.object({ type: z.literal("ping") }).strict(),
-  z.object({
-    type: z.literal("reportPlayer"),
-    targetPlayerId: z.string().min(1).max(64),
-    category: z.enum(["CHEATING", "HARASSMENT", "OTHER"]),
-  }).strict(),
   z.object({ type: z.literal("ready"), ready: z.boolean() }),
   z.object({ type: z.literal("chooseTeam"), teamId: z.enum(["BLUE", "RED"]) }),
   z.object({ type: z.literal("captain"), action: z.enum(["claim", "release"]) }),
@@ -216,7 +210,7 @@ export type LobbyCommand = Extract<
   ClientCommand,
   { type: "chooseTeam" | "captain" | "beginAllocation" | "ready" | "allocate" | "lockAllocation" | "startCountdown" | "cancelCountdown" | "setRoomPublic" }
 >;
-export type GameCommand = Extract<ClientCommand, { type: "interact" | "linkStart" | "linkStop" | "ping" | "reportPlayer" | "rematch" }>;
+export type GameCommand = Extract<ClientCommand, { type: "interact" | "linkStart" | "linkStop" | "ping" }>;
 
 export const openRoomListingSchema = z.object({
   roomCode: z.string().length(6).regex(/^[A-Z2-9]+$/),
