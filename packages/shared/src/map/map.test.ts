@@ -128,6 +128,47 @@ function shortestDiagonalSteps(grid: readonly boolean[], start: number, target: 
 }
 
 describe("canonical Warehouse Complex geometry", () => {
+  it("keeps three distinct approaches open at each headquarters", () => {
+    for (const point of [
+      { x: 624, y: 2_112 }, { x: 624, y: 3_264 }, { x: 1_056, y: 2_688 },
+      { x: 10_608, y: 2_112 }, { x: 10_608, y: 3_264 }, { x: 10_176, y: 2_688 },
+      { x: 2_064, y: 1_008 }, { x: 2_064, y: 4_368 },
+      { x: 9_120, y: 1_008 }, { x: 9_696, y: 4_368 },
+    ]) {
+      expect(canStandAt(point.x, point.y), `approach at ${point.x}, ${point.y} should fit a player`).toBe(true);
+    }
+  });
+
+  it("allows a player through the storage entrance and across the rack aisle", () => {
+    // Sample a continuous, player-sized path from the east entrance into the room.
+    for (let x = 9_792; x >= 9_360; x -= 12) {
+      expect(canStandAt(x, 4_368), `storage entrance should be clear at x=${x}`).toBe(true);
+    }
+    // The cross aisle is clear across the remaining rack.
+    for (let x = 8_544; x <= 9_456; x += 12) {
+      expect(canStandAt(x, 4_560), `storage cross aisle should be clear at x=${x}`).toBe(true);
+    }
+  });
+
+  it("connects each side entrance to its own route without the front gate", () => {
+    const grid = walkableGrid();
+    for (const x of [1_032, 10_200]) {
+      for (let y = 2_496; y <= 2_880; y += CELL) grid[cellAt({ x, y })] = false;
+    }
+    for (const [start, target, blockedSide] of [
+      [{ x: 624, y: 2_352 }, { x: 2_160, y: 1_008 }, "south"],
+      [{ x: 624, y: 2_352 }, { x: 2_160, y: 4_368 }, "north"],
+      [{ x: 10_608, y: 2_352 }, { x: 9_024, y: 1_008 }, "south"],
+      [{ x: 10_608, y: 2_352 }, { x: 9_600, y: 4_368 }, "north"],
+    ] as const) {
+      const routeGrid = [...grid];
+      const blockedY = blockedSide === "north" ? 2_112 : 3_216;
+      for (let x = start.x - 144; x <= start.x + 144; x += CELL) {
+        for (let y = blockedY; y <= blockedY + 96; y += CELL) routeGrid[cellAt({ x, y })] = false;
+      }
+      expect(reachableFrom(routeGrid, cellAt(start)).has(cellAt(target)), `${blockedSide} gate closed`).toBe(true);
+    }
+  });
   it("fits the authored world and mirrors the two headquarters", () => {
     expect(ARENA_CONFIG).toMatchObject({ width: 11_232, height: 5_376 });
     expect(ARENA_CONFIG.width % CELL).toBe(0);
@@ -145,7 +186,7 @@ describe("canonical Warehouse Complex geometry", () => {
     for (const id of ["blue-hq", "receiving", "north-docks", "sorting", "dispatch", "red-hq", "maintenance", "security-office", "packing", "storage"]) {
       expect(ids.has(id)).toBe(true);
     }
-    expect(WAREHOUSE_PROPS.length).toBeGreaterThan(20);
+    expect(WAREHOUSE_PROPS.filter(({ id }) => id.startsWith("rack-")).map(({ id }) => id)).toEqual(["rack-2-upper", "rack-2-lower"]);
     for (const prop of WAREHOUSE_PROPS) {
       expect(prop.x).toBeGreaterThanOrEqual(0);
       expect(prop.y).toBeGreaterThanOrEqual(0);
@@ -211,6 +252,7 @@ describe("canonical Warehouse Complex geometry", () => {
     }
     const pickups = generatePickupLocations(17);
     expect(pickups.length).toBeGreaterThanOrEqual(12);
+    expect(pickups.filter(({ x, y }) => x >= 4_800 && x <= 6_432 && y >= 2_160 && y <= 3_216).length).toBeGreaterThanOrEqual(4);
     expect(pickups).toEqual(generatePickupLocations(17));
     expect(pickups.every(({ x, y }) => canStandAt(x, y))).toBe(true);
     expect(pickups.every(({ x, y }) => Object.values(TEAM_BASES).every((base) =>
@@ -225,9 +267,9 @@ describe("canonical Warehouse Complex geometry", () => {
     expect(SIGHT_BLOCKER_SEGMENTS).not.toContainEqual(expect.objectContaining({ start: { x: glass.x, y: glass.y } }));
     expect(hasLineOfSight({ x: 4_368, y: 4_128 }, { x: 4_512, y: 4_128 })).toBe(true);
 
-    const rack = ARENA_OBSTACLES.find(({ id }) => id === "rack-1-north")!;
+    const rack = ARENA_OBSTACLES.find(({ id }) => id === "rack-2-north")!;
     expect(MOVEMENT_COLLIDERS).toContain(rack);
-    expect(hasLineOfSight({ x: 8_352, y: 4_224 }, { x: 8_544, y: 4_224 })).toBe(false);
+    expect(hasLineOfSight({ x: 8_976, y: 4_224 }, { x: 9_168, y: 4_224 })).toBe(false);
   });
 
   it("keeps optimized line-of-sight results identical to the original full segment scan", () => {
