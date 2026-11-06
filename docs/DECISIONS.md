@@ -2,11 +2,11 @@
 
 ## 2026-10-29 — 4v4/5v5 match settings and Quick Play scope
 
-Official rooms support team sizes of four or five per side. Private matches default to 5v5 and 900 seconds, and allow durations from 300 to 1,800 seconds in 60-second steps. Quick Play uses 5-, 10-, 15- or 20-minute queue presets and matches only equal team sizes and durations. Parties stay together; queue assignment fills open slots with solos or compatible parties. Public Quick Play remains gated until abuse reporting and queue rate limits are available.
+Official rooms support team sizes of four or five per side. Private matches default to 5v5 and 900 seconds, and allow durations from 300 to 1,800 seconds in 60-second steps. Quick Play uses 5-, 10-, 15- or 20-minute queue presets and matches only equal team sizes and durations. Parties stay together; queue assignment fills open slots with solos or compatible parties. Public Quick Play remains gated until queue rate limits and a player-safety handling process are in place.
 
 Match settings are validated at room creation, owned by the server for the lifetime of the room and included in lobby/game/result snapshots. The matchmaking coordinator is in-process and ephemeral, consistent with the single-Node deployment; it introduces no database, broker or additional service. Quick Play joins an indivisible solo/party ticket to an exact 4v4 or 5v5 composition, assigns both teams server-side, then reserves seats in standard ArenaRooms. The queue remains attached until clients have joined and stored their Arena reconnect token; incomplete handoffs expire after the 120-second reconnect grace. A queue disconnect pauses eligibility during that same grace period. Production Quick Play is opt-in with `ENABLE_QUICK_PLAY=true`; it is enabled automatically outside production. Restarting the server clears parties and queues.
 
-Reports are validated and rate-limited in ArenaRoom, then emitted as structured `osmosis.abuse_report` JSON to server stdout; no report database or moderation console is added in this milestone. Public enablement remains an explicit deployment decision.
+In-game player reporting is not included. Operators must define a player-safety handling process before enabling public Quick Play; the production flag remains opt-in.
 
 ## 2026-10-25 — M0/M1 prototype tuning values
 

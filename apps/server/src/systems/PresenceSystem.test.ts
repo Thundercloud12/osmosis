@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ServerPlayer } from "../rooms/Player";
-import { connectedPlayerCount, disconnectPlayer, oldestConnectedPlayerId, purgeDisconnectedPlayersForRematch, reconnectPlayer } from "./PresenceSystem";
+import { connectedPlayerCount, disconnectPlayer, oldestConnectedPlayerId, reconnectPlayer } from "./PresenceSystem";
 
 function makePlayer(overrides: Partial<ServerPlayer> = {}): ServerPlayer {
   return {
@@ -68,16 +68,5 @@ describe("player presence transitions", () => {
     ];
     expect(connectedPlayerCount(players)).toBe(2);
     expect(oldestConnectedPlayerId(players)).toBe("middle");
-  });
-
-  it("keeps only connected players or seats whose reconnect window is still open for a rematch", () => {
-    const players = new Map([
-      ["connected", makePlayer({ id: "connected" })],
-      ["reserved", makePlayer({ id: "reserved", connected: false, status: "DISCONNECTED", reconnectUntil: 20_000 })],
-      ["expired", makePlayer({ id: "expired", connected: false, status: "DISCONNECTED", reconnectUntil: 9_000 })],
-      ["left", makePlayer({ id: "left", connected: false, status: "DISCONNECTED", reconnectUntil: undefined })],
-    ]);
-    purgeDisconnectedPlayersForRematch(players, 10_000);
-    expect([...players.keys()].sort()).toEqual(["connected", "reserved"]);
   });
 });

@@ -120,7 +120,7 @@ Use explicit typed inputs/results and injected clocks where time matters. Avoid 
 - Client may predict **its own** movement and reconcile to server snapshots; remote players interpolate. No client-side optimistic score changes. Movement polish must preserve authoritative server movement and shared collision geometry.
 - Process input sequence numbers/timestamps to reject stale or repeated commands; rate-limit inputs and HTTP endpoints.
 - Validate immutable match settings at room creation: official `teamSize` is 4 or 5 and `matchDurationSeconds` is 300–1,800 in 60-second increments. Default to 5v5/900 seconds. Development-only 1v1 and 2v2 rooms remain gated by the existing test-room policy.
-- Use server monotonic elapsed time for the configured match duration; expose remaining time to clients; server decides on the exact timeout. Rematches preserve the room's settings.
+- Use server monotonic elapsed time for the configured match duration; expose remaining time to clients; server decides on the exact timeout.
 - The match is authoritative **even if a client opens devtools or tampers with Phaser**.
 
 ### State partitioning (critical)
@@ -150,16 +150,16 @@ Use explicit typed inputs/results and injected clocks where time matters. Avoid 
 ## 5. Match lifecycle / state machine
 
 ```text
-CREATED -> LOBBY -> ALLOCATION -> COUNTDOWN -> PLAYING -> RESULTS -> LOBBY (rematch)
+CREATED -> LOBBY -> ALLOCATION -> COUNTDOWN -> PLAYING -> RESULTS
                               \-> LOBBY (cancellation)
 ```
 
-Only server performs transitions. Lobby requires the configured room size/team; allocation must sum to 10,000/team, assign at least 500 to each player, and be locked; countdown requires all connected players ready; start initializes spawns, items, configured deadline and active status atomically. `RESULTS` is terminal for the round; rematch creates fresh round state without leaking prior scores and retains the room settings.
+Only server performs transitions. Lobby requires the configured room size/team; allocation must sum to 10,000/team, assign at least 500 to each player, and be locked; countdown requires all connected players ready; start initializes spawns, items, configured deadline and active status atomically. `RESULTS` is terminal. Players leave the completed room and create or join another room to play again.
 
 Player status is independent of match phase: `ACTIVE`, temporary `INACTIVE`, `ELIMINATED`, or `DISCONNECTED`. INACTIVE players may move but cannot collect pickups, link, raid or win an ordinary battle until their timer expires or they enter their own base. Contact between ACTIVE and INACTIVE opponents freezes only the ACTIVE player's movement for three server seconds; it changes neither player's status or score. The active freeze deadline is private to its player. Pole-holder contact takes precedence and permanently eliminates the touching opponent, clears their remaining points without transferring them, and emits a contact-scoped visual event. Battle settlement that reduces any player's individual balance to zero also permanently eliminates that player. `ELIMINATED` is permanent for the current round and retains its room membership with a zero balance; the client switches to spectator mode and remains in team voice. A spectator automatically follows a living teammate in deterministic roster order and receives only that teammate's filtered view. If every rostered player on a team is `ELIMINATED`, the other team wins immediately.
 
 ### Roles
-- **Host:** can start/cancel countdown and rematch; not automatically a team captain.
+- **Host:** can start/cancel countdown; not automatically a team captain.
 - **Captain:** can submit/lock allocation for own team.
 - **Player:** nickname, ready, move, battle, link, raid, voice, ping; an eliminated player may spectate but cannot submit gameplay actions.
 - Role assignment and transfer are server-validated. Never trust a client-provided `isHost` or `isCaptain` flag.
@@ -199,7 +199,7 @@ Use an explicit schema validator (Zod) at the network boundary. Send typed serve
 
 | System | Server invariant |
 |---|---|
-| Match settings | Validated once on room creation, immutable through play and rematch; included in lobby and gameplay/result snapshots |
+| Match settings | Validated once on room creation, immutable through play; included in lobby and gameplay/result snapshots |
 | Team allocation | Exactly 10,000 per team for either team size; 100-point increments; each player starts at >=500; locked before start |
 | Movement | Never crosses blocked tile or bounds; collision math deterministic. ACTIVE and INACTIVE may move unless the server freeze deadline is in the future |
 | LOS | Occlusion computed from map wall segments; no unseen enemy position serialized |
@@ -232,7 +232,7 @@ The previous 96-unit hard-correction threshold was too large relative to the 38-
 - Client requests a server token for a channel using its signed player credential. The server derives team membership, round and room name from authoritative room state. A requested `TEAM` token permits only the player's assigned Team room; a `GLOBAL` token permits only that match's Global room. Never trust a client-supplied team, room name or round.
 - Use separate LiveKit client sessions for Team and Global so subscriptions can be controlled independently. Global opt-out unsubscribes Global audio tracks while preserving Team audio. Global sessions connect only when the player listens or selects Global transmission.
 - The outgoing microphone target is exactly one channel at a time. Switching target mutes the old channel before the new one can publish; selecting a target never unmutes automatically. One local DEAFEN control silences incoming audio from both sessions; Global mute affects Global reception only.
-- Voice disconnect or denial must not block game join. Game reconnect, rematch, explicit voice leave and unmount clean up both LiveKit sessions; opted-in sessions may rejoin muted after game reconnect/rematch.
+- Voice disconnect or denial must not block game join. Game reconnect, explicit voice leave and unmount clean up both LiveKit sessions; opted-in sessions may rejoin muted after game reconnect.
 - Never ship LiveKit API secret to browser; do not record voice; issue short-lived, channel-scoped tokens only for connected room members.
 - Use `V` as a microphone toggle for the selected transmit target with displayed state matching LiveKit's actual microphone state; begin muted and handle no-audio-device and browser autoplay policies gracefully.
 
@@ -255,7 +255,7 @@ The previous 96-unit hard-correction threshold was too large relative to the 38-
 4. Reconnect/session tokens and voice credentials are signed, scoped, short-lived; use HTTPS/WSS in deployment.
 5. Rate-limit creates, joins, movement and token issuance; sanitize nicknames; cap request lengths.
 6. Team and Global voice are opt-in with clear channel-specific mute and full deafen controls; no voice recording and no unnecessary personal data collection.
-7. Quick Play stays disabled in production by default. Before enabling public access, operators must decide how structured abuse reports in server logs will be reviewed. Private invite rooms remain available independently.
+7. Quick Play stays disabled in production by default. There is no in-game player-reporting flow; operators should define how player conduct concerns will be handled before opening public access. Private invite rooms remain available independently.
 
 The 1v1 and 2v2 room modes are temporary test-only options. The client exposes them in development builds; the server rejects them when `NODE_ENV=production` unless `ENABLE_TEST_ROOM_MODES=true` is explicitly set for a controlled test deployment.
 
@@ -273,7 +273,7 @@ Game server --signed, scoped voice token--> browser
 - The production Compose definition is `deploy/compose.production.yaml`. It runs only the Node server and publishes port 2567 on EC2 loopback (`127.0.0.1:2567`). Caddy terminates HTTPS/WSS on the instance and proxies to that port. The production backend hostname is `game.keerthanpoojary.tech`, configured as a DNS-only A record to the EC2 Elastic IP. Set `VITE_GAME_SERVER_URL=https://game.keerthanpoojary.tech` in the frontend production build; the Colyseus client upgrades room connections to WSS. Set `CLIENT_ORIGINS` to the exact frontend origin. The backend does not use `cloudflared` or a Cloudflare-proxied hostname.
 - EC2 accepts public HTTPS and HTTP for the direct web endpoint, but not SSH or port 2567; use Systems Manager for administration. DNS-only backend traffic bypasses Cloudflare's HTTP proxy protections, so the origin IP is public. Browser voice signaling/media connects directly to LiveKit. Do not route WebRTC media through the game server.
 - `.github/workflows/deploy.yml` runs typecheck, tests and builds on pull requests and relevant `main` pushes. It pushes immutable server images to ECR and asks EC2 to pull and run them through Systems Manager. Frontend-only pushes continue through the existing Cloudflare static frontend without restarting the game server. GitHub OIDC assumes a dedicated application deployment role; no SSH key or AWS access key is stored in GitHub. Terraform lives in the single production root `infra/`, with validation/plan in `.github/workflows/infra.yml` and manually approved saved-plan apply in `.github/workflows/infra-apply.yml`. See `infra/README.md` for setup.
-- The in-memory matchmaking coordinator groups parties without splitting them and forms two exact teams at the configured team size. Queue keys include team size and one of the documented Quick Play duration presets. Disconnected queue members pause eligibility during the 120-second reconnect grace; after the grace expires the affected queue ticket is removed. Handoff reserves all seats in one ordinary ArenaRoom, keeps the queue connection until the client joins and stores its Arena reconnect token, and expires an incomplete lobby handoff after 120 seconds. Allocation, readiness and gameplay remain ArenaRoom's responsibility. Abuse reports are validated and rate-limited by ArenaRoom and emitted as structured JSON to server stdout; no persistence or moderation service is introduced. Do not add a database, Redis, broker or matchmaking service for this single-instance launch.
+- The in-memory matchmaking coordinator groups parties without splitting them and forms two exact teams at the configured team size. Queue keys include team size and one of the documented Quick Play duration presets. Disconnected queue members pause eligibility during the 120-second reconnect grace; after the grace expires the affected queue ticket is removed. Handoff reserves all seats in one ordinary ArenaRoom, keeps the queue connection until the client joins and stores its Arena reconnect token, and expires an incomplete lobby handoff after 120 seconds. Allocation, readiness and gameplay remain ArenaRoom's responsibility. Do not add a database, Redis, broker or matchmaking service for this single-instance launch.
 - Environment keys: client game URL, server CORS origin, LiveKit URL, LiveKit API key/secret, token signer secret, and `ENABLE_QUICK_PLAY`; env example is committed, real secrets are not. Quick Play is enabled automatically outside production and remains disabled in production unless explicitly set to `true`.
 - Log room creation, join/leave/reconnect, phase transitions, battle/raid aggregate counts and exceptions; do not log audio, raw voice tokens or sensitive credentials.
 - The private `/internal/metrics` endpoint reports room and connected-player counts, process CPU/memory, event-loop delay, and rolling simulation tick duration/interval percentiles. It uses Node built-ins, returns JSON, and is disabled unless `METRICS_TOKEN` is set. Extend this as server instrumentation for patch latency, disconnects, rejected commands, and voice join failures is added.
@@ -283,7 +283,7 @@ Game server --signed, scoped voice token--> browser
 
 **Unit (pure rules):** allocation totals, tie handling, capped transfers, linked settlement (including one player at zero), pole-holder elimination precedence, exclusive pole ownership, permanent elimination, 15-second inactivity and re-arm, raid interruption, cooldowns, deterministic ordering, timer boundaries, occlusion segment tests.
 
-**Integration (server):** two Colyseus clients in a room; complete 4v4 and 5v5 allocation/start with >=500 per player; validate duration boundaries and reject forged score; walls stop movement; hidden enemy omitted from client snapshot; enemy inactivity and opposing score fields absent from every PLAYING payload; RESULTS includes both team totals, every player balance and match settings; zero-balance and pole eliminations clear points and preserve spectator behavior; only event participants receive tag feedback; Team/Global token scopes and private Team-room isolation; rematch preserves settings and resets round state; two-room isolation. M7 adds party integrity, queue matching/cancellation and abuse/rate-limit coverage.
+**Integration (server):** two Colyseus clients in a room; complete 4v4 and 5v5 allocation/start with >=500 per player; validate duration boundaries and reject forged score; walls stop movement; hidden enemy omitted from client snapshot; enemy inactivity and opposing score fields absent from every PLAYING payload; RESULTS includes both team totals, every player balance and match settings; zero-balance and pole eliminations clear points and preserve spectator behavior; only event participants receive tag feedback; Team/Global token scopes and private Team-room isolation; two-room isolation. M7 adds party integrity, queue matching/cancellation and queue rate-limit coverage.
 
 **E2E (browser):** create room -> join -> choose teams -> allocate -> start -> walk/tag/collect/raid -> pole elimination -> spectate -> results; verify HQ fights without a pole holder; verify score/status privacy; mic denial fallback; browser refresh and rejoin. Use deterministic debug/accelerated clock only in test mode, not production gameplay.
 

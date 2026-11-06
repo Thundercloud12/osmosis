@@ -23,7 +23,7 @@ Implementation order and verification are tracked in [IMPLEMENTATION_BACKLOG.md]
 | Help ping | `G` requests a four-second Help marker above the requester and a minimap pulse. The server uses authoritative player position, limits requests to one every three seconds, and projects the marker only to teammates. | Headful 2v2 Chromium playtest confirmed the requester marker and minimap pulse, delivery to the same-team client, omission from the opposing team's snapshot and browser, cooldown, and expiry. |
 | Modular boundaries | Shared movement, server movement/battle/pickup/link/raid/status/projection, client prediction/interpolation/tracing, and map/fog/crewmate renderers have explicit modules. The room owns canonical state and tick ordering; the Phaser scene composes presentation and input. | Lobby/session methods and some scene link/camera feedback remain adapters; final regression review checks for duplicate rules and lifecycle leaks. |
 | Temporary test modes | 1v1/2v2 selectors appear in development. The server rejects these modes in production unless `ENABLE_TEST_ROOM_MODES=true`. | Dev selection and match startup passed in Chromium; production gating is covered by policy tests. |
-| Reconnect and presence | Unexpected drops freeze the player and reserve the same seat for 120 seconds. Reconnect restores the player ID, score and prior status; host transfer is deterministic. Explicit leave clears the browser token, and disconnected records are removed before a rematch unless their reservation is still live. | Room integration and headful Chromium full-process-restart checks verify the 120-second reservation, same identity and score, host handoff, no duplicate seat, and explicit leave. Public-tunnel reconnection remains open. |
+| Reconnect and presence | Unexpected drops freeze the player and reserve the same seat for 120 seconds. Reconnect restores the player ID, score and prior status; host transfer is deterministic. Explicit leave clears the browser token. | Room integration and headful Chromium full-process-restart checks verify the 120-second reservation, same identity and score, host handoff, no duplicate seat, and explicit leave. Public-tunnel reconnection remains open. |
 
 ## Source-audit items deferred from core gameplay repair
 
@@ -32,7 +32,7 @@ These are PRD launch scope, not reported defects being repaired in this pass:
 - Contextual in-match hints are deferred; the landing-page field guide is implemented. See [NOT_NEEDED_NOW.md](NOT_NEEDED_NOW.md).
 - Physical microphone permission-denial behavior and real-device voice quality.
 - Reduced-motion support for Phaser game feedback is deferred. Key remapping, broad UI contrast improvements, separate volume controls, and in-match hints are also deferred in [NOT_NEEDED_NOW.md](NOT_NEEDED_NOW.md).
-- Ten-player load/fairness tests, privacy notice and abuse reporting before public matchmaking.
+- Ten-player load/fairness tests, privacy notice and a player-safety handling process before public matchmaking.
 - Manual spectator target selection; spectators currently follow one deterministic teammate.
 
 ## Verification completed
@@ -50,6 +50,6 @@ These are PRD launch scope, not reported defects being repaired in this pass:
 - Visually review zero-balance feedback in a browser; tag, pole and raid effects were reviewed in the headful 5v5 run.
 - Run a browser scenario with natural movement to choreograph pickup contention, ordinary HQ collision and pole contact; the current bot scenario deterministically positions the pole collision so that it can be replayed.
 - Extend bot movement from the current short deterministic route to longer seeded play patterns and collect movement/collision/pickup telemetry over a full match duration.
-- Exercise reconnect/rematch through the public Cloudflare tunnel with repeatable traces. Local full-browser shutdown/restart and room-token acceptance are now verified.
+- Exercise reconnect through the public game endpoint with repeatable traces. Local full-browser shutdown/restart and room-token acceptance are now verified.
 - Verify physical microphone capture, permission denial and real-device voice quality; synthetic same-team delivery and cross-team isolation now pass in the automated three-browser run.
 - Run load/fairness checks for a full 10-player match under network impairment.

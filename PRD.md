@@ -9,7 +9,7 @@
 A polished, browser-based, real-time, top-down 2D team strategy game inspired by point-based territory competitions. Players can create private rooms, join Quick Play alone, or queue as a party while keeping their team open for other players. Matches support 4v4 or 5v5, configurable duration, private Team voice and optional match-wide Global voice. No account or installation required.
 
 ### Success criteria for v1
-- Eight or ten players can join a private lobby (4 or 5 per team), ready up, play, view results and rematch.
+- Eight or ten players can join a private lobby (4 or 5 per team), ready up, play and view results.
 - A room host can choose a match length from 5 to 30 minutes in one-minute increments; the server owns the clock.
 - A solo player can queue for a random team. A party can queue together and keep its team open for solo or party players without splitting its members; Quick Play team assignments stay locked in the lobby.
 - Quick Play pairs only compatible team sizes and duration presets; a full match enters the existing lobby, allocation and ready flow.
@@ -22,7 +22,7 @@ A polished, browser-based, real-time, top-down 2D team strategy game inspired by
 - A player must provide a valid 1–24 character crewmate name before creating or joining a room; blank and whitespace-only names are rejected by both the interface and server.
 
 ### Non-goals (v1)
-Ranked play, accounts, mobile touchscreen controls, free spectator access for people who were not eliminated in the match, cosmetics, inventory, persistent profile/statistics, replay, monetization, AI players, full 3D, cross-match progression and microservices. Public Quick Play is in scope; it must not launch before the abuse-reporting and rate-limit gate in M7.
+Ranked play, accounts, mobile touchscreen controls, free spectator access for people who were not eliminated in the match, cosmetics, inventory, persistent profile/statistics, replay, monetization, AI players, full 3D, cross-match progression and microservices. Public Quick Play is in scope; it must not launch before queue rate limits and a player-safety handling process are in place.
 
 ## 2. Target player and platform
 - **Players:** Solo players and parties; full matches contain eight or ten active participants.
@@ -43,7 +43,6 @@ Ranked play, accounts, mobile touchscreen controls, free spectator access for pe
 | 6. Ready/countdown | Players confirm ready; host presses Start; 5-second countdown | Match transitions to playing atomically |
 | 7. Match | Move, scout, collect items, tag enemies, link teammates, threaten bases, coordinate over private Team voice or opt-in Global voice; pole-eliminated players spectate | Configured timer expires or every player on one team is permanently eliminated |
 | 8. Results | Winning team, both final team totals and every player's final points | Result shown to all players |
-| 9. Rematch | Same lobby/team membership and match settings; fresh scores, positions and items; captains allocate again | New round ready |
 
 ### What the player sees during a match
 - **Phaser arena:** industrial containers/walls, top-down characters with team colors, camera follows local player.
@@ -106,12 +105,12 @@ These are chosen rules for the browser adaptation. Constants belong in one share
 | FR-09 | Team linking | Two-player group compares combined points and resolves transfer once |
 | FR-10 | Pickups and raids | Server validates distance, activity, pickup ownership and raid cooldown |
 | FR-11 | HUD and team minimap | Own points and own crew score shown; opponent numeric points and score absent from every live payload; unseen enemy positions absent |
-| FR-12 | Match results and rematch | Both final team totals and every player's final points are shown; score ties resolve to draw; second match begins from reset state |
+| FR-12 | Match results | Both final team totals and every player's final points are shown; score ties resolve to draw |
 | FR-13 | Team and Global voice | Blue and Red Team channels remain isolated. Any connected player may opt into Global audio without leaving Team voice; Global transmissions reach only Global listeners. Muting Global preserves Team reception, full DEAFEN silences both, and the microphone transmits to only one selected channel at a time. |
 | FR-14 | Reconnect and host/captain reassignment | Rejoin within 120 seconds restores the same identity/state even after browser closure; after expiry the player remains unavailable for the rest of the match. A failed saved-token reconnect never silently creates a duplicate seat |
 | FR-15 | Exclusive HQ pole and permanent elimination | One holder per pole; opponent contact eliminates the attacker for the round and clears their remaining points without transferring them; holder stays active; eliminated client can spectate without bypassing visibility filters |
-| FR-16 | Server-owned match settings | Room and match snapshots expose the authoritative team size and duration; rematches preserve both |
-| FR-17 | Solo and party Quick Play | Compatible queue groups form full 4v4 or 5v5 matches; party members remain on one team; queue cancellation and abuse reports are available |
+| FR-16 | Server-owned match settings | Room and match snapshots expose the authoritative team size and duration |
+| FR-17 | Solo and party Quick Play | Compatible queue groups form full 4v4 or 5v5 matches; party members remain on one team; queue cancellation is available |
 
 ### P1: polish after core play is stable
 - Ready-check and roster transitions with clear reasons why Start is disabled.
@@ -159,7 +158,7 @@ These are chosen rules for the browser adaptation. Constants belong in one share
 | Both players touch simultaneously | One deterministic result; one transfer; no duplicate events |
 | Game clock expires during raid | Raid cancels; finish and score using server state at timeout |
 | Equal team scores | DRAW screen, no tiebreaker |
-| Offensive nickname / abuse | Nickname length/character limits and in-game mute; keep Quick Play gated until abuse reporting and queue rate limits are available |
+| Offensive nickname / abuse | Nickname length/character limits and in-game mute; define a player-safety process and queue rate limits before opening Quick Play publicly |
 | Empty room | Dispose in-memory room after grace timeout; invite becomes invalid |
 | Party larger than selected team | Reject queue entry with a clear reason; never split the party |
 | Solo or party cancels Quick Play | Remove that queue entry; do not create a match from the cancelled group |
@@ -172,7 +171,7 @@ These are chosen rules for the browser adaptation. Constants belong in one share
 3. **Allocation:** captain sliders/fields with remaining counter; team read-only view; Lock.
 4. **Arena:** Phaser canvas + React HUD; `WASD` move, `E` interact / start raid, `F` link (hold), `G` request team Help, `V` toggle the selected Team or Global microphone; voice dock controls Team/Global reception, transmit target and full DEAFEN; `Esc` settings.
 5. **Spectator:** eliminated players follow an eligible teammate using that teammate's visibility-filtered view.
-6. **Results:** winner, both final team totals, all players' final points, pickups, raids, rematch.
+6. **Results:** winner, both final team totals, all players' final points, pickups and raids.
 
 **Gameplay readability:** characters should have name labels and team-color outlines; containers visibly block movement and sight; clear indicator distinguishes player inactivity from being disconnected.
 
@@ -187,7 +186,7 @@ These are chosen rules for the browser adaptation. Constants belong in one share
 | M4 — Rules | Tags, linking, pickups, ordinary HQ battles, exclusive pole holder, permanent pole elimination/spectating, score, timer, result | Deterministic automated unit/integration tests pass; pole contact eliminates only the attacker and no-pole HQ contact settles normally |
 | M5 — Voice and resilience | Private Team LiveKit rooms, optional match-wide Global room, channel-scoped secure tokens, independent reception, one outgoing mic target, full deafen, 120-second reconnect including browser closure and explicit leave | Team isolation and Global opt-in boundaries verified; Global mute preserves Team audio; reconnect preserves identity/state and never duplicates a player; explicit leave cancels rejoin; eliminated players never re-arm on reconnect |
 | M6 — Polish and playtest | UX hints, pole/elimination feedback, measured movement reconciliation/interpolation, ping system, asset/audio polish, load and fairness testing | Complete 4v4 and 5v5 sessions without critical blockers; movement and privacy checks pass |
-| M7 — Parties and Quick Play | Solo and party queues, open team vacancies, compatible mode/duration matching, abuse reporting and queue rate limits | Solo and parties can form full matches without splitting teams; cancelled/disconnected queue entries cannot create invalid lobbies |
+| M7 — Parties and Quick Play | Solo and party queues, open team vacancies, compatible mode/duration matching and queue rate limits | Solo and parties can form full matches without splitting teams; cancelled/disconnected queue entries cannot create invalid lobbies |
 
 ## 10. Open questions (do not silently invent during implementation)
 - The next implementation work is tracked in [docs/IMPLEMENTATION_BACKLOG.md](docs/IMPLEMENTATION_BACKLOG.md), with observed behavior in [docs/IMPLEMENTATION_GAPS.md](docs/IMPLEMENTATION_GAPS.md).
@@ -199,6 +198,6 @@ These are chosen rules for the browser adaptation. Constants belong in one share
 - Exact map dimensions, move speed, view radius and scoring balance (configuration + playtest).
 - Whether partially complete lobbies should have a **demo** mode (v1 multiplayer requires ten).
 - Whether to rename the final product and create fully original artwork/branding before public release.
-- Public Quick Play remains disabled by default in production. Reports are currently delivered to structured server logs, so public operations must decide how those logs will be reviewed before enabling the queue.
+- Public Quick Play remains disabled by default in production. There is no in-game player-reporting flow; operators must define how player conduct concerns will be handled before enabling the queue.
 
 **Agent implementation directive:** Execute milestones in order; do not introduce out-of-scope systems to “future-proof” v1. Implement decisions above unless recorded as open questions. Keep product behavior testable rather than implied.

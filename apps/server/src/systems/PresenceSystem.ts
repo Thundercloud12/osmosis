@@ -44,10 +44,3 @@ export function oldestConnectedPlayerId(players: Iterable<ServerPlayer>): string
     .filter((player) => player.connected)
     .sort((left, right) => left.joinOrder - right.joinOrder)[0]?.id;
 }
-
-/** Removes explicit departures and expired reservations before a rematch roster is built. */
-export function purgeDisconnectedPlayersForRematch(players: Map<string, ServerPlayer>, now: number): void {
-  for (const [sessionId, player] of players) {
-    if (!player.connected && (player.reconnectUntil === undefined || player.reconnectUntil <= now)) players.delete(sessionId);
-  }
-}
